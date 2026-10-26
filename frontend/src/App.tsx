@@ -16,7 +16,7 @@ const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) =
 
   if (isLoading) {
     return (
-      <div className="min-h-screen w-full flex items-center justify-center bg-[#0B0F19] text-gray-400 text-sm">
+      <div className="min-h-screen w-full flex items-center justify-center bg-slate-50 text-slate-600 text-sm font-medium">
         Verifying security token...
       </div>
     );

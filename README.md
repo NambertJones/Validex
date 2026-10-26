@@ -1,7 +1,7 @@
-# AICTE Smart Document Validation Platform
+# Validex — AICTE Smart Document Validation Platform
 ### SIH Problem Statement ID: 26261 · Team: We Aren't Robots
 
-![AICTE Validation Architecture](https://img.shields.io/badge/AICTE-Approval%20Bureau-4F46E5?style=for-the-badge&logo=shield)
+![AICTE Validation Architecture](https://img.shields.io/badge/Validex-AICTE%20Approval%20Bureau-4F46E5?style=for-the-badge&logo=shield)
 ![Status](https://img.shields.io/badge/Status-Hackathon%20Ready-10B981?style=for-the-badge)
 ![FastAPI](https://img.shields.io/badge/FastAPI-005571?style=for-the-badge&logo=fastapi)
 ![React](https://img.shields.io/badge/React_Vite-20232A?style=for-the-badge&logo=react)
@@ -11,7 +11,7 @@
 
 ## 🎯 Executive Overview
 
-The **AICTE Smart Document Validation Platform** is an enterprise-grade AI decision-support system designed to automate the screening, validation, and forensic examination of technical institutional approval applications for the **All India Council for Technical Education (AICTE)**.
+**Validex** is an enterprise-grade AI decision-support and smart document validation platform designed to automate the screening, forensic examination, and compliance verification of technical institutional approval applications for the **All India Council for Technical Education (AICTE)**. Built with a clean, high-contrast, professional portal interface, Validex empowers scrutiny officers with instantaneous fraud telemetry and institutional insights.
 
 It eliminates manual document verification backlogs, detects sophisticated digital forgeries (pasted stamps, altered validity dates, cloned signatures), verifies credentials against authoritative source APIs (DigiLocker, State Fire Authority, ICAI UDIN, MCA), evaluates physical laboratory photos via YOLOv8 computer vision, and generates an evidence-linked audit trail for scrutiny committee officials.
 
