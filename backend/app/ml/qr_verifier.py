@@ -46,9 +46,13 @@ def _embedded_images(file_bytes: bytes, max_pages: int = 3) -> list[np.ndarray]:
     return out
 
 
+MAX_DECODE_SIDE = 2400  # cap upscaling so a full-page search cannot spike memory on small hosts
+
+
 def _try_decode(gray: np.ndarray, detectors) -> str | None:
+    scales = [s for s in (1, 2, 3) if max(gray.shape) * s <= MAX_DECODE_SIDE] or [1]
     for det in detectors:
-        for scale in (1, 2, 3):
+        for scale in scales:
             img = gray if scale == 1 else cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
             img = cv2.copyMakeBorder(img, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=255)
             try:

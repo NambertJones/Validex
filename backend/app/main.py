@@ -61,7 +61,7 @@ app = FastAPI(
         "tampering indicators, issuing-authority verification, infrastructure CV and a hash-chained audit ledger. "
         "All AI outputs are advisory; decisions are recorded by authorised officials."
     ),
-    version="2.0.0",
+    version="2.1.0",
     lifespan=lifespan,
 )
 
@@ -91,11 +91,25 @@ app.include_router(api_router)
 app.include_router(mock_authority_router)
 
 
+def _engines() -> dict:
+    """Which ML engines are installed (checked without loading any model)."""
+    import importlib.util
+    import os
+    import shutil
+    from app.ml.detectors import ONNX_WEIGHTS
+
+    has = lambda m: importlib.util.find_spec(m) is not None  # noqa: E731
+    ocr = [n for n, ok in (("easyocr", has("easyocr")), ("tesseract", has("pytesseract") and shutil.which("tesseract"))) if ok]
+    det = [n for n, ok in (("onnxruntime", has("onnxruntime") and os.path.exists(ONNX_WEIGHTS)), ("ultralytics", has("ultralytics"))) if ok]
+    return {"ocr": ocr or ["pdf-text-only"], "detector": det or ["none"]}
+
+
 @app.get("/health")
 def health_check():
-    return {"status": "healthy", "app": settings.APP_NAME, "version": "2.0.0",
+    return {"status": "healthy", "app": settings.APP_NAME, "version": "2.1.0",
             "async_mode": "celery" if settings.USE_CELERY else "background-tasks",
-            "authority_connector": "http" if settings.AUTHORITY_API_URL else "in-process-mock"}
+            "authority_connector": "http" if settings.AUTHORITY_API_URL else "in-process-mock",
+            "engines": _engines()}
 
 
 @app.get("/")

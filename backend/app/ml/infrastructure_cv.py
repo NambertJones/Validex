@@ -79,13 +79,8 @@ class InfrastructureCV:
     def _get_model(self):
         if not self._initialized:
             self._initialized = True
-            try:
-                from ultralytics import YOLO
-                os.makedirs(MODEL_DIR, exist_ok=True)
-                self._model = YOLO(os.path.join(MODEL_DIR, "yolov8n.pt"))
-                logger.info("YOLOv8n loaded for infrastructure analysis.")
-            except Exception as e:
-                logger.warning(f"YOLO unavailable ({e}); infrastructure analysis will request manual review.")
+            from app.ml.detectors import load_detector
+            self._model = load_detector(MODEL_DIR)
         return self._model
 
     @staticmethod
@@ -122,10 +117,14 @@ class InfrastructureCV:
         issues = []
         if not HAS_OPENCV:
             return {"issues": issues}
+        h0, w0 = img.shape[:2]
         gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        if max(h0, w0) > 1600:  # judge sharpness at a fixed scale and keep memory bounded
+            r = 1600 / max(h0, w0)
+            gray = cv2.resize(gray, (int(w0 * r), int(h0 * r)), interpolation=cv2.INTER_AREA)
         brightness = float(gray.mean())
         sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-        h, w = gray.shape
+        h, w = h0, w0
         if brightness < 50:
             issues.append("Photo is too dark to assess equipment reliably")
         if sharpness < 40:
@@ -155,21 +154,17 @@ class InfrastructureCV:
         raw: dict[str, int] = {}
         best_frame, best_total = None, -1
         for frame in frames:
-            result = model(frame, conf=0.3, verbose=False)[0]
-            counts: dict[str, int] = {}
-            for box in result.boxes:
-                name = model.names[int(box.cls)]
-                counts[name] = counts.get(name, 0) + 1
+            counts, annotated = model.detect(frame)
             # Across video keyframes take the max per class to avoid double counting the same item
             for k, v in counts.items():
                 raw[k] = max(raw.get(k, 0), v)
             total = sum(counts.values())
             if total > best_total:
-                best_total, best_frame = total, result.plot()[:, :, ::-1]  # BGR -> RGB
+                best_total, best_frame = total, annotated
 
         equipment = self._derive(raw)
         return InfrastructureReport("analyzed", equipment, raw, self._flags(norms, equipment), quality,
-                                    _data_uri(best_frame if best_frame is not None else frames[0]), len(frames), "yolov8n (COCO)")
+                                    _data_uri(best_frame if best_frame is not None else frames[0]), len(frames), model.name)
 
     @staticmethod
     def _derive(raw: dict[str, int]) -> dict[str, int]:

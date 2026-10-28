@@ -4,7 +4,7 @@ FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 
-RUN apt-get update && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 libpq5 \
+RUN apt-get update && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 libpq5 tesseract-ocr \
     && rm -rf /var/lib/apt/lists/*
 
 # Spaces run the container as uid 1000
@@ -13,8 +13,8 @@ ENV HOME=/home/user YOLO_CONFIG_DIR=/home/user/.config/Ultralytics
 WORKDIR /app
 
 RUN pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
-COPY --chown=user backend/requirements.txt backend/requirements.txt
-RUN pip install -r backend/requirements.txt
+COPY --chown=user backend/requirements.txt backend/requirements-ml.txt backend/
+RUN pip install -r backend/requirements-ml.txt
 
 COPY --chown=user . /app
 RUN chown user /app

@@ -11,6 +11,7 @@ import base64
 import hashlib
 import logging
 import re
+import threading
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -270,14 +271,19 @@ class DocumentService:
         return "inline"
 
 
+# Bounds peak memory on small hosts: heavy documents are processed this many at a time
+_processing_slots = threading.BoundedSemaphore(max(settings.MAX_CONCURRENT_PROCESSING, 1))
+
+
 def run_processing_in_new_session(doc_id: uuid.UUID, user_id: uuid.UUID | None) -> None:
     from app.core.database import SessionLocal
 
-    db = SessionLocal()
-    try:
-        document_service.process_document(db, doc_id, user_id)
-    finally:
-        db.close()
+    with _processing_slots:
+        db = SessionLocal()
+        try:
+            document_service.process_document(db, doc_id, user_id)
+        finally:
+            db.close()
 
 
 document_service = DocumentService()

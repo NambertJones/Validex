@@ -1,6 +1,10 @@
-# Hosting the backend on a free Hugging Face Space
+# Hosting the backend on a Hugging Face Space
 
-Frontend stays on Vercel. Backend runs as a Hugging Face **Docker Space** (free CPU tier, about 16 GB RAM).
+> **Cost:** Hugging Face now requires a PRO subscription to run Docker (and Gradio) Spaces, including on the
+> CPU-basic hardware; only static Spaces are free. For free hosting use the light image on Render instead
+> (`backend/Dockerfile`, fits 512 MB). Use this guide if you have PRO or need the full EasyOCR build.
+
+Frontend stays on Vercel. Backend runs as a Hugging Face **Docker Space** (CPU basic, about 16 GB RAM; needs PRO).
 The database is a free **Neon** Postgres, because the Space's disk is wiped on every restart.
 
 ```
