@@ -8,7 +8,8 @@ import pytest
 
 _TMP = tempfile.mkdtemp(prefix="validex_test_")
 os.environ.update({
-    "DATABASE_URL": f"sqlite:///{_TMP}/test.db",
+    # TEST_DATABASE_URL lets the suite run against Postgres (must be an empty database)
+    "DATABASE_URL": os.environ.get("TEST_DATABASE_URL", f"sqlite:///{_TMP}/test.db"),
     "INLINE_PROCESSING": "true",
     "USE_MINIO": "false",
     "USE_CELERY": "false",

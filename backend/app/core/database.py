@@ -71,6 +71,13 @@ def sync_schema(bind=None):
                 logger.info(f"Schema sync: added column {table.name}.{col.name}")
 
     if dialect.name == "postgresql":
+        # The audit ledger must not be rewritten by cascading deletes: drop the legacy FK on
+        # audit_logs.application_id (the one deliberate non-additive change).
+        with bind.begin() as conn:
+            for fk in insp.get_foreign_keys("audit_logs"):
+                if fk.get("constrained_columns") == ["application_id"] and fk.get("name"):
+                    conn.execute(text(f'ALTER TABLE audit_logs DROP CONSTRAINT "{fk["name"]}"'))
+                    logger.info(f"Schema sync: dropped {fk['name']} from audit_logs")
         # New enum members must be added to the native PG enum types
         with bind.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
             for table in Base.metadata.sorted_tables:

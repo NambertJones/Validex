@@ -14,7 +14,9 @@ class AuditLog(Base):
     id = Column(Uuid, primary_key=True, default=uuid.uuid4)
     user_id = Column(Uuid, ForeignKey("users.id"), nullable=True)
     actor_role = Column(String(32), nullable=True)  # "system" for automated checks
-    application_id = Column(Uuid, ForeignKey("applications.id", ondelete="SET NULL"), nullable=True)
+    # Plain reference, deliberately without a foreign key: a cascading SET NULL/DELETE would
+    # rewrite ledger rows and break the hash chain. Entries keep the ID after an application is deleted.
+    application_id = Column(Uuid, nullable=True, index=True)
     action = Column(String(128), nullable=False)  # e.g., "DOCUMENT_UPLOADED", "APPLICATION_DECISION"
     details = Column(JSON, default=dict, nullable=False)
     ip_address = Column(String(64), nullable=True)
@@ -24,4 +26,7 @@ class AuditLog(Base):
     entry_hash = Column(String(64), nullable=True, index=True)
 
     user = relationship("User", back_populates="audit_logs")
-    application = relationship("Application", back_populates="audit_logs")
+    application = relationship(
+        "Application", back_populates="audit_logs",
+        primaryjoin="foreign(AuditLog.application_id) == Application.id", viewonly=True,
+    )

@@ -77,4 +77,7 @@ class Application(Base):
     validation_results = relationship("ValidationResult", back_populates="application", cascade="all, delete-orphan")
     notifications = relationship("Notification", back_populates="application", cascade="all, delete-orphan")
     # Audit logs are intentionally NOT cascaded: the ledger must outlive the application.
-    audit_logs = relationship("AuditLog", back_populates="application", passive_deletes="all")
+    audit_logs = relationship(
+        "AuditLog", back_populates="application", viewonly=True,
+        primaryjoin="Application.id == foreign(AuditLog.application_id)",
+    )
