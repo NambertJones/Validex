@@ -103,6 +103,23 @@ def test_invalid_rule_rejected(client, admin, officer):
     assert client.post("/api/compliance/rules", json=good, headers=officer).status_code == 403
 
 
+def test_deleting_application_keeps_audit_chain_intact(client, officer, apex):
+    from app.core.database import SessionLocal
+    from app.models.application import Application
+    from app.models.audit_log import AuditLog
+
+    app_id = client.post("/api/applications", json={"category": "eoa"}, headers=apex).json()["id"]
+    db = SessionLocal()
+    try:
+        app = db.get(Application, __import__("uuid").UUID(app_id))
+        db.delete(app)
+        db.commit()
+        assert db.query(AuditLog).filter(AuditLog.application_id == app.id).count() >= 1  # ledger keeps the reference
+    finally:
+        db.close()
+    assert client.get("/api/audit/verify-chain", headers=officer).json()["valid"] is True
+
+
 def test_audit_chain_detects_tampering(client, officer):
     from app.core.database import SessionLocal
     from app.models.audit_log import AuditLog

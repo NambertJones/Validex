@@ -77,6 +77,8 @@ docker compose up -d --build                       # dev: web :3000, API :8000, 
 docker compose exec backend python ../scripts/generate_demo_data.py --reset
 ```
 
+**Free hosting:** see [deploy/hf-space/SETUP.md](deploy/hf-space/SETUP.md) to run the backend on a free Hugging Face Docker Space (16 GB RAM) with Neon Postgres, keeping the frontend on Vercel.
+
 `docker-compose.prod.yml` keeps every service on an internal network and exposes only Nginx on :80. It requires `SECRET_KEY`, `POSTGRES_PASSWORD` and the MinIO credentials; see `.env.production.example`. Pre-load the `models` volume (YOLO + EasyOCR weights), because the internal network has no internet access.
 
 ---
