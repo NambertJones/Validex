@@ -15,6 +15,16 @@ def test_health(client):
     assert client.get("/health").json()["status"] == "healthy"
 
 
+def test_cors_allows_deployed_frontend_only(client):
+    def preflight(origin):
+        return client.options("/api/auth/login-json", headers={
+            "Origin": origin, "Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "content-type"})
+
+    ok = preflight("https://validex-two.vercel.app")
+    assert ok.status_code == 200 and ok.headers["access-control-allow-origin"] == "https://validex-two.vercel.app"
+    assert preflight("https://evil.example.com").status_code == 400
+
+
 def test_self_registration_cannot_create_admin(client):
     res = client.post("/api/auth/register", json={"email": "evil@x.com", "password": "password123",
                                                    "full_name": "Evil", "role": "admin"})

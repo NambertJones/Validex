@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     DEBUG: bool = False
     CORS_ORIGINS: str = "http://localhost:3000,http://localhost:5173"
+    # Deployed frontend(s); always allowed in addition to CORS_ORIGINS
+    FRONTEND_ORIGINS: str = "https://validex-two.vercel.app"
 
     # Database (defaults to local sqlite for standalone run, overridden by .env in Docker)
     DATABASE_URL: str = "sqlite:///./validex.db"
@@ -65,7 +67,8 @@ class Settings(BaseSettings):
 
     @property
     def cors_origins_list(self) -> list[str]:
-        return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
+        origins = [o.strip() for o in f"{self.CORS_ORIGINS},{self.FRONTEND_ORIGINS}".split(",") if o.strip()]
+        return ["*"] if "*" in origins else list(dict.fromkeys(origins))
 
     @property
     def is_production(self) -> bool:
