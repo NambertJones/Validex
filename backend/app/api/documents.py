@@ -1,122 +1,175 @@
-"""Document upload, inspection, and OCR data retrieval endpoints."""
+"""Documents: upload, replace (rectification), progress, evidence and page rendering."""
 
 import io
 import uuid
 from typing import Annotated
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Response, UploadFile, status
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.database import get_db
-from app.core.dependencies import get_current_user
+from app.core.dependencies import (
+    get_application_for_user, get_current_user, get_document_for_user, is_official, require_official, require_role,
+)
 from app.core.storage import storage
-from app.models.user import User
-from app.models.application import Application
-from app.models.document import Document, DocumentType, DocumentStatus
-from app.schemas.document import DocumentResponse, DocumentDetailResponse
-from app.services.document_service import document_service
+from app.models.application import ApplicationStatus
+from app.models.document import Document, DocumentType
+from app.models.user import User, UserRole
+from app.schemas.document import DocumentDetailResponse, DocumentResponse
+from app.schemas.validation import ValidationResultResponse
+from app.schemas.verification import VerificationResponse
+from app.services.audit_service import audit_service
+from app.services.document_service import document_service, evidence_object
 
 router = APIRouter(prefix="/documents", tags=["Documents"])
+
+UPLOADABLE = {ApplicationStatus.DRAFT, ApplicationStatus.DEFICIENCY_FOUND}
+require_institution = require_role([UserRole.INSTITUTION])
+
+
+async def _read_limited(file: UploadFile) -> bytes:
+    data = await file.read(settings.MAX_UPLOAD_MB * 1024 * 1024 + 1)
+    if len(data) > settings.MAX_UPLOAD_MB * 1024 * 1024:
+        raise HTTPException(status_code=413, detail=f"File exceeds {settings.MAX_UPLOAD_MB} MB")
+    return data
 
 
 @router.post("/upload", response_model=DocumentResponse, status_code=status.HTTP_201_CREATED)
 async def upload_document(
+    background_tasks: BackgroundTasks,
     application_id: Annotated[uuid.UUID, Form()],
     file: Annotated[UploadFile, File()],
+    current_user: Annotated[User, Depends(require_institution)],
+    db: Annotated[Session, Depends(get_db)],
     doc_type: Annotated[DocumentType | None, Form()] = None,
-    current_user: Annotated[User, Depends(get_current_user)] = None,
-    db: Session = Depends(get_db),
 ):
-    """Upload a document PDF or image to an AICTE application:
-    Runs OCR extraction, document classification, and forgery forensics automatically.
-    """
-    app = db.query(Application).filter(Application.id == application_id).first()
-    if not app:
-        raise HTTPException(status_code=404, detail="Target application not found")
+    """Institution uploads evidence (PDF/JPEG/PNG, or MP4 lab walkthrough). Processing runs asynchronously;
+    poll GET /documents/{id}/status for progress."""
+    app = get_application_for_user(db, application_id, current_user)
+    if app.status not in UPLOADABLE:
+        raise HTTPException(status_code=409, detail="Documents can only be added while the application is a draft or under rectification")
+    data = await _read_limited(file)
+    doc = document_service.create_document(db, app, data, file.filename or "upload", current_user.id, doc_type)
+    document_service.schedule_processing(db, doc.id, current_user.id, background_tasks)
+    db.refresh(doc)
+    return doc
 
-    file_bytes = await file.read()
-    if len(file_bytes) == 0:
-        raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
-    doc = document_service.process_and_save_document(
-        db=db,
-        application_id=application_id,
-        file_bytes=file_bytes,
-        filename=file.filename or "uploaded_document.pdf",
-        user_id=current_user.id if current_user else None,
-        manual_doc_type=doc_type,
-    )
-
+@router.post("/{doc_id}/replace", response_model=DocumentResponse, status_code=status.HTTP_201_CREATED)
+async def replace_document(
+    doc_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
+    file: Annotated[UploadFile, File()],
+    current_user: Annotated[User, Depends(require_institution)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Rectification: upload a corrected version of one document. The previous version is kept for audit."""
+    old = get_document_for_user(db, doc_id, current_user)
+    if not old.is_current:
+        raise HTTPException(status_code=409, detail="This document has already been replaced")
+    app = get_application_for_user(db, old.application_id, current_user)
+    if app.status not in UPLOADABLE:
+        raise HTTPException(status_code=409, detail="Documents can only be replaced while the application is a draft or under rectification")
+    data = await _read_limited(file)
+    doc = document_service.create_document(db, app, data, file.filename or old.original_filename, current_user.id,
+                                           old.doc_type, replaces=old)
+    document_service.schedule_processing(db, doc.id, current_user.id, background_tasks)
+    db.refresh(doc)
     return doc
 
 
 @router.get("/{doc_id}", response_model=DocumentDetailResponse)
-def get_document(
-    doc_id: uuid.UUID,
-    db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User, Depends(get_current_user)],
-):
-    """Get metadata, validation flags, and presigned access for a document."""
-    doc = db.query(Document).filter(Document.id == doc_id).first()
-    if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
-
-    download_url = None
-    try:
-        download_url = storage.get_presigned_url(doc.storage_path)
-    except Exception:
-        pass
-
+def get_document(doc_id: uuid.UUID, db: Annotated[Session, Depends(get_db)],
+                 current_user: Annotated[User, Depends(get_current_user)]):
+    doc = get_document_for_user(db, doc_id, current_user)
+    versions = (db.query(Document).filter(Document.application_id == doc.application_id, Document.doc_type == doc.doc_type)
+                .order_by(Document.uploaded_at).all())
+    base = DocumentResponse.model_validate(doc).model_dump()
     return DocumentDetailResponse(
-        id=doc.id,
-        application_id=doc.application_id,
-        doc_type=doc.doc_type,
-        original_filename=doc.original_filename,
-        file_size=doc.file_size,
-        mime_type=doc.mime_type,
-        status=doc.status,
-        extracted_data=doc.extracted_data,
-        page_count=doc.page_count,
-        uploaded_at=doc.uploaded_at,
-        download_url=download_url,
-        validation_count=len(doc.validation_results),
-        verification_count=len(doc.verifications),
+        **base,
+        verifications=[VerificationResponse.model_validate(v).model_dump(mode="json")
+                       for v in sorted(doc.verifications, key=lambda v: v.verified_at, reverse=True)],
+        findings=[ValidationResultResponse.model_validate(f).model_dump(mode="json") for f in doc.validation_results],
+        versions=[{"id": str(v.id), "filename": v.original_filename, "uploaded_at": v.uploaded_at.isoformat(),
+                   "is_current": v.is_current, "status": v.status.value} for v in versions],
     )
 
 
-@router.get("/{doc_id}/extracted-data")
-def get_extracted_data(
-    doc_id: uuid.UUID,
-    db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User, Depends(get_current_user)],
-):
-    """Retrieve structured OCR-extracted key-value pairs and confidence metrics."""
-    doc = db.query(Document).filter(Document.id == doc_id).first()
-    if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
-
-    return {
-        "document_id": str(doc.id),
-        "doc_type": doc.doc_type.value,
-        "extracted_data": doc.extracted_data,
-        "forgery_score": (doc.extracted_data or {}).get("forgery_score", 0.0),
-        "heatmap_available": bool((doc.extracted_data or {}).get("forgery_heatmap_preview")),
-    }
+@router.get("/{doc_id}/status")
+def get_processing_status(doc_id: uuid.UUID, db: Annotated[Session, Depends(get_db)],
+                          current_user: Annotated[User, Depends(get_current_user)]):
+    doc = get_document_for_user(db, doc_id, current_user)
+    return {"id": str(doc.id), "status": doc.status.value, "stage": doc.processing_stage,
+            "progress": doc.processing_progress or 0, "doc_type": doc.doc_type.value}
 
 
-@router.get("/{doc_id}/preview")
-def get_document_file(
-    doc_id: uuid.UUID,
-    db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User, Depends(get_current_user)],
-):
-    """Serve the raw document file bytes for in-browser viewer."""
-    doc = db.query(Document).filter(Document.id == doc_id).first()
-    if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
+@router.post("/{doc_id}/reprocess", response_model=DocumentResponse)
+def reprocess(doc_id: uuid.UUID, background_tasks: BackgroundTasks, db: Annotated[Session, Depends(get_db)],
+              current_user: Annotated[User, Depends(require_official)]):
+    doc = get_document_for_user(db, doc_id, current_user)
+    document_service.schedule_processing(db, doc.id, current_user.id, background_tasks)
+    db.refresh(doc)
+    return doc
 
+
+def _log_view(db: Session, user: User, doc: Document, what: str) -> None:
+    if is_official(user):
+        audit_service.log_event(db=db, action="DOCUMENT_VIEWED", user_id=user.id, application_id=doc.application_id,
+                                details={"document_id": str(doc.id), "view": what})
+
+
+@router.get("/{doc_id}/file")
+def get_document_file(doc_id: uuid.UUID, db: Annotated[Session, Depends(get_db)],
+                      current_user: Annotated[User, Depends(get_current_user)]):
+    doc = get_document_for_user(db, doc_id, current_user)
     try:
-        file_bytes = storage.get_bytes(doc.storage_path)
-        return Response(content=file_bytes, media_type=doc.mime_type)
-    except Exception:
-        # If MinIO is offline, return synthetic document response or 404
-        raise HTTPException(status_code=404, detail="File object not available in active storage")
+        data = storage.get_bytes(doc.storage_path)
+    except FileNotFoundError:
+        raise HTTPException(status_code=410, detail="File is no longer stored (retention period ended)")
+    _log_view(db, current_user, doc, "file")
+    return Response(content=data, media_type=doc.mime_type,
+                    headers={"Content-Disposition": f'inline; filename="{doc.original_filename}"',
+                             "Cache-Control": "private, no-store"})
+
+
+@router.get("/{doc_id}/page/{page}")
+def render_page(doc_id: uuid.UUID, page: int, db: Annotated[Session, Depends(get_db)],
+                current_user: Annotated[User, Depends(get_current_user)]):
+    """PNG of one page (PDF) or the image itself, for the evidence overlay viewer."""
+    import fitz
+    from PIL import Image
+
+    doc = get_document_for_user(db, doc_id, current_user)
+    try:
+        data = storage.get_bytes(doc.storage_path)
+    except FileNotFoundError:
+        raise HTTPException(status_code=410, detail="File is no longer stored")
+    if doc.mime_type == "application/pdf":
+        pdf = fitz.open(stream=data, filetype="pdf")
+        if not 0 <= page < len(pdf):
+            raise HTTPException(status_code=404, detail="Page out of range")
+        png = pdf[page].get_pixmap(dpi=110).tobytes("png")
+    elif doc.mime_type.startswith("image/"):
+        img = Image.open(io.BytesIO(data)).convert("RGB")
+        img.thumbnail((1400, 1400))
+        buf = io.BytesIO()
+        img.save(buf, "PNG")
+        png = buf.getvalue()
+    else:
+        raise HTTPException(status_code=415, detail="No page preview for this file type")
+    _log_view(db, current_user, doc, f"page:{page}")
+    return Response(content=png, media_type="image/png", headers={"Cache-Control": "private, no-store"})
+
+
+@router.get("/{doc_id}/evidence/{kind}")
+def get_evidence_image(doc_id: uuid.UUID, kind: str, db: Annotated[Session, Depends(get_db)],
+                       current_user: Annotated[User, Depends(get_current_user)]):
+    """Annotated evidence images: 'evidence' (tamper boxes), 'ela' (ELA heatmap), 'annotated' (CV detections)."""
+    if kind not in ("evidence", "ela", "annotated"):
+        raise HTTPException(status_code=404, detail="Unknown evidence kind")
+    doc = get_document_for_user(db, doc_id, current_user)
+    try:
+        data = storage.get_bytes(evidence_object(doc, kind))
+    except (FileNotFoundError, ValueError):
+        raise HTTPException(status_code=404, detail="No such evidence image")
+    return Response(content=data, media_type="image/jpeg", headers={"Cache-Control": "private, no-store"})

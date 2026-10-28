@@ -38,3 +38,10 @@ Thumbs.db
 .idea/
 .vscode/*
 !.vscode/extensions.json
+
+# ML model weights (downloaded on first use) and generated evaluation artefacts
+backend/ml_models/
+ml_models/
+sample_docs/eval/
+sample_docs/lab_photos/*
+!sample_docs/lab_photos/README.md

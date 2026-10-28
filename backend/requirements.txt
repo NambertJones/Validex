@@ -2,42 +2,35 @@
 fastapi>=0.115
 uvicorn[standard]>=0.30
 python-multipart>=0.0.9
+httpx>=0.27
 
 # Database
 sqlalchemy>=2.0
 alembic>=1.13
 psycopg2-binary>=2.9
-psycopg[binary]>=3.1
 
-# Task queue
+# Task queue (used when USE_CELERY=true)
 celery[redis]>=5.4
 flower>=2.0
 
-# Auth
-python-jose[cryptography]>=3.3
-passlib[bcrypt]>=1.7
+# Auth & security
+PyJWT>=2.8
+cryptography>=42          # Ed25519 signatures on certificate QR codes
 pydantic-settings>=2.0
 
 # Storage
 minio>=7.2
 
-# OCR & Document Processing
-paddleocr>=2.9
-paddlepaddle>=2.6
-pytesseract>=0.3
+# Documents, OCR & forensics
 pymupdf>=1.24
 Pillow>=10.0
-
-# Computer Vision & ML
 opencv-python-headless>=4.9
-ultralytics>=8.2
 numpy>=1.26
-scikit-image>=0.22
+easyocr>=1.7              # raster OCR (scans/photos); PDFs with a text layer need no OCR
+rapidfuzz>=3.6            # fuzzy name matching
 
-# Utilities
-httpx>=0.27
-pyzbar>=0.1
+# Computer vision (install CPU torch first: pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision)
+ultralytics>=8.2
 
 # Testing
 pytest>=8.0
-httpx>=0.27

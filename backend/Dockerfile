@@ -1,24 +1,20 @@
 FROM python:3.12-slim
 
 WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 
-# System deps for OCR, CV, PDF processing, QR codes
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    tesseract-ocr \
-    libgl1 \
-    libglib2.0-0 \
-    libzbar0 \
-    poppler-utils \
-    gcc \
-    libpq-dev \
+# OpenCV runtime libs and the Postgres client library
+RUN apt-get update && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 libpq5 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
+# CPU-only PyTorch keeps the image a few GB smaller than the default CUDA wheels
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch torchvision
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
+RUN useradd --create-home validex && mkdir -p storage_vault ml_models && chown -R validex /app
+USER validex
 
 EXPOSE 8000
-
 CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

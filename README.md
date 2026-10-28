@@ -1,179 +1,165 @@
-# Validex — AICTE Smart Document Validation Platform
-### SIH Problem Statement ID: 26261 · Team: We Aren't Robots
+# Validex — AI decision support for AICTE application validation
 
-![AICTE Validation Architecture](https://img.shields.io/badge/Validex-AICTE%20Approval%20Bureau-4F46E5?style=for-the-badge&logo=shield)
-![Status](https://img.shields.io/badge/Status-Hackathon%20Ready-10B981?style=for-the-badge)
-![FastAPI](https://img.shields.io/badge/FastAPI-005571?style=for-the-badge&logo=fastapi)
-![React](https://img.shields.io/badge/React_Vite-20232A?style=for-the-badge&logo=react)
-![PyTorch YOLOv8](https://img.shields.io/badge/YOLOv8-Infrastructure%20CV-orange?style=for-the-badge)
+**SIH 2026 · Problem Statement SIH26261 · Team We Aren't Robots**
 
----
+Validex pre-screens AICTE approval applications (EoA and other categories). It reads the uploaded documents, checks them against configurable Approval Process Handbook rules and AICTE's own institutional records, looks for signs of tampering and re-used evidence, verifies certificates with their issuing authorities (signed QR codes and registry lookups), and assists with infrastructure evidence using computer vision.
 
-## 🎯 Executive Overview
+Every result is an **evidence-linked, explainable finding** for an official. The system never approves, rejects or issues notices on its own. Decisions are recorded by an authorised officer, with reasons, in a hash-chained audit ledger.
 
-**Validex** is an enterprise-grade AI decision-support and smart document validation platform designed to automate the screening, forensic examination, and compliance verification of technical institutional approval applications for the **All India Council for Technical Education (AICTE)**. Built with a clean, high-contrast, professional portal interface, Validex empowers scrutiny officers with instantaneous fraud telemetry and institutional insights.
-
-It eliminates manual document verification backlogs, detects sophisticated digital forgeries (pasted stamps, altered validity dates, cloned signatures), verifies credentials against authoritative source APIs (DigiLocker, State Fire Authority, ICAI UDIN, MCA), evaluates physical laboratory photos via YOLOv8 computer vision, and generates an evidence-linked audit trail for scrutiny committee officials.
-
-> **Human-in-the-Loop Principle:** The AI acts as an evidentiary copilot and risk screener. Human officials retain full and final decision-making authority.
+> All data in this repository is synthetic. The issuing authorities and AICTE records are simulated behind pluggable adapters; the system does not assume access to any restricted database.
 
 ---
 
-## 🏗️ System Architecture
+## What the problem statement asks for, and where it is
 
-```text
-┌────────────────────────────────────────────────────────────────────────┐
-│                        React + Vite + Tailwind Frontend                │
-│  - Scrutiny Dashboard      - Document Vault & ELA Heatmap Viewer       │
-│  - Application Dossier     - Compliance Rulebook & Audit Log           │
-└───────────────────────────────────┬────────────────────────────────────┘
-                                    │ HTTP / REST
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│                        FastAPI Application Core                        │
-│  - JWT & RBAC Engine       - Validation Service                        │
-│  - Document Pipeline       - Compliance Rules Engine                   │
-│  - Third-Party Connectors  - Audit Logger                              │
-└───────────┬───────────────────────┬──────────────────────┬─────────────┘
-            │                       │                      │
-            ▼                       ▼                      ▼
-┌──────────────────────┐  ┌──────────────────┐  ┌────────────────────────┐
-│  PostgreSQL Database │  │   Redis & Celery │  │      MinIO Storage     │
-│  - Relational Schema │  │   Task Queues    │  │   - Encrypted Document │
-│  - Audit Logs        │  │   (OCR, CV, ELA) │  │     Artifact Vault     │
-└──────────────────────┘  └─────────┬────────┘  └────────────────────────┘
-                                    │
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│                      Deep ML / Forensics Engines                       │
-│  - PaddleOCR + PyMuPDF: Dual-Engine Text & Table Extraction            │
-│  - Error Level Analysis (ELA): JPEG Recompression Splicing Detector    │
-│  - ORB/SIFT Matching: Copy-Move Stamp & Signature Cloned Patch Scanner │
-│  - PDF Metadata Forensics: Revision & Timestamp Anomaly Analysis       │
-│  - YOLOv8: Physical Lab Hardware & Fire Safety Compliance Counter      │
-└────────────────────────────────────────────────────────────────────────┘
+| Requirement | Implementation |
+|---|---|
+| Category-based checklist and configurable rules | `services/rule_engine.py`: rules are data (`requires_doc` + `check {fact, op, value}`), filtered by application category, versioned, edited in the UI by admins with an audited reason. |
+| Retrieve records from authorised AICTE systems | `services/records_service.py` via the connector: approved intake, faculty on record, TER payment, previous EoA, open deficiencies. Used by rules and cross-checks. |
+| OCR, classification, extraction | Native PDF text (visibility-aware, so text hidden under a whiteout is ignored), EasyOCR with OpenCV preprocessing for scans/photos, keyword classifier with a wrong-slot warning, domain extractors with multi-format dates. |
+| Missing / incomplete / expired / inconsistent | Completeness and expiry via rules; fuzzy name matching (RapidFuzz + abbreviation normalisation) across documents, the application and AICTE records; land and faculty cross-checks. |
+| Alterations, duplicates, metadata, mismatched identifiers | `ml/forgery_detector.py` (cover-up boxes, overlapping text layers, font/baseline anomalies, revision history, editing-tool metadata; for images: noise consistency, verified copy-move, ELA as a weak signal). `services/duplicate_service.py` (exact hash, perceptual hash across institutions, the same certificate/UDIN number used by different institutions). |
+| Verification at the source | `services/verification_service.py`: Ed25519-signed QR codes checked offline (and compared with the printed text), plus registry lookups. Statuses: verified, mismatch, expired, pending, source unavailable, manual review, each with source, identifiers sent, timestamp, field-by-field comparison and reason. Retry with exponential backoff, a circuit breaker and a periodic sweep (Celery beat). |
+| Infrastructure assistance | `ml/infrastructure_cv.py`: YOLOv8 on photos and video keyframes, equipment minimums from rules, evidence-quality checks (dark, blurred, low resolution), honest "not detectable / manual review" when it cannot tell. Floor-plan classroom areas are checked by rule. |
+| Dashboard, alerts, audit trail | Officials' dashboard (live KPIs, alerts, metrics), per-application findings, split-screen document review with evidence overlays, append-only hash-chained ledger with an integrity check. |
+| Institution alerts / rectification | Deficiency notices with plain-language fix instructions per item, a due date, in-app inbox (email if SMTP is set), replace-one-document versioning, resubmission, self-check before submitting. |
+| Role-based access, human review | Roles: admin, scrutiny, expert, institution. Object-level access checks on every endpoint. Self-registration creates institutions only. Adverse decisions, and overrides of the AI advice, require written reasons. |
+| Security, confidentiality, retention | Salted PBKDF2 passwords, JWT, login rate limit, upload type sniffing and size limit, server-generated storage names, document-view logging, retention purge (dry run by default), security headers, internal-only network in production compose. |
+
+---
+
+## Architecture
+
+```
+React (Vite + Tailwind) ── institution portal · scrutiny workspace · rules editor · audit ledger
+        │ /api (JWT)
+FastAPI ── auth/RBAC · applications · documents · validation · verification · rules · audit · notices
+   │            │                         │
+   │   Celery workers (Redis)        Connector adapters ──► simulated issuing authorities (separate service)
+   │   heavy: OCR, forensics, YOLO        (in-process or HTTP)  └► simulated AICTE institutional records
+   │   light: source checks, email
+   │   beat : retry sweep
+PostgreSQL / SQLite (data + hash-chained audit) · MinIO / local vault (files + evidence images)
 ```
 
----
-
-## ⚡ Key Capabilities & The 6 Modules
-
-### 1. Optical Character Recognition (OCR) & Entity Extraction
-* Dual-engine processing with **PaddleOCR** and **PyMuPDF**.
-* Auto-classification into statutory document types (Fire Safety, Audited Balance Sheet, Land Deed, Faculty List, Affidavit, Building Plan).
-* Regex entity extraction for certificate numbers, UDINs, expiry dates, land acreage, and faculty cadre counts.
-
-### 2. Multi-Technique Document Forgery Detection
-* **Error Level Analysis (ELA):** Recompresses image at 90% quality and computes pixel delta; detects localized compression anomalies from digitally spliced dates or numbers.
-* **Copy-Move Clone Detection:** ORB feature matching detects identical duplicated stamps, seals, or signatures within a document.
-* **Noise Inconsistency Analysis:** Laplacian variance across tile grids to detect pasted text blocks from different sources.
-* **PDF Structural Forensics:** Scans for creation date vs modification date disparities and image-editing tool footprints (Photoshop, Canva, Sejda).
-* **Visual Heatmap Overlay:** Generates color-coded evidence heatmaps displayed directly in the web UI.
-
-### 3. Source Verification Integration
-* Simulates and connects to authoritative verification gateways:
-  * **DigiLocker:** Verifies Land Title Deeds and Academic Credentials.
-  * **State Fire & Emergency Services Portal:** Real-time lookup for Fire Safety Certificates.
-  * **ICAI UDIN Portal:** Verifies 18-digit Unique Document Identification Numbers for Audited Financials.
-  * **MCA / RoC:** Validates educational trust and society registrations.
-
-### 4. Physical Infrastructure Computer Vision (YOLOv8)
-* Deep learning model detects and counts laboratory equipment (computers, workstations, projectors, fire extinguishers, first aid kits).
-* Automatically checks compliance against AICTE Approval Process Handbook norms (e.g., minimum 15 workstations per computer lab).
-
-### 5. Configurable Compliance Rulebook
-* Centralized norms engine encoding statutory AICTE requirements.
-* Validates completeness, expiry dates, and cross-document consistency (e.g., institution name match across all deeds and certificates).
-
-### 6. Audit Trail & Decision Governance
-* Immutable chronological event logging for all uploads, AI detections, and official officer actions.
-* Transparent confidence scores and evidence snippets linked to every finding.
+Processing pipeline per document, with a live progress bar in the UI:
+`OCR → classify → extract fields → locate fields → forensics → duplicates → QR + registry verification` (lab photos and videos go to the CV stage).
 
 ---
 
-## 🚀 Quickstart Guide
+## Quick start (local, no Docker)
 
-### Option 1: Docker Compose (Full Stack Orchestration)
-
-Ensure Docker Desktop is running, then run:
-
-```bash
-# 1. Start all services (PostgreSQL, Redis, MinIO, FastAPI, Celery, Frontend)
-docker compose up -d --build
-
-# 2. Seed default demo data and synthetic applications
-docker compose exec backend python ../scripts/generate_demo_data.py
-```
-
-Access the services:
-* **Web Portal:** [http://localhost:3000](http://localhost:3000)
-* **Backend API Documentation:** [http://localhost:8000/docs](http://localhost:8000/docs)
-* **Celery Flower Dashboard:** [http://localhost:5555](http://localhost:5555)
-* **MinIO Console:** [http://localhost:9001](http://localhost:9001)
-
----
-
-### Option 2: Local Development Setup
-
-#### Backend Setup
 ```bash
 cd backend
 python -m venv .venv
-# Windows:
-.venv\Scripts\activate
-# Linux/macOS:
-source .venv/bin/activate
-
+.venv\Scripts\activate            # Linux/macOS: source .venv/bin/activate
+pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
 pip install -r requirements.txt
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+python ../scripts/generate_demo_data.py --reset    # synthetic documents + 3 seeded applications
+uvicorn app.main:app --port 8000
 ```
 
-#### Frontend Setup
 ```bash
 cd frontend
 npm install
-npm run dev
+npm run dev                         # http://localhost:3000 (proxies /api to :8000)
 ```
 
-Frontend will be available at [http://localhost:3000](http://localhost:3000) with automatic proxying to `http://localhost:8000/api`.
+* API docs (for portal integration): http://localhost:8000/docs
+* The first run downloads YOLOv8n and the EasyOCR models into `backend/ml_models/`.
+* Uploads are processed as FastAPI background tasks locally; set `USE_CELERY=true` with Redis for workers.
+* Put 2+ **real computer-lab photos** in `sample_docs/lab_photos/` before seeding; otherwise placeholders are used and the lab rule (correctly) asks for better evidence.
+
+### Docker
+
+```bash
+docker compose up -d --build                       # dev: web :3000, API :8000, Flower :5555
+docker compose exec backend python ../scripts/generate_demo_data.py --reset
+```
+
+`docker-compose.prod.yml` keeps every service on an internal network and exposes only Nginx on :80. It requires `SECRET_KEY`, `POSTGRES_PASSWORD` and the MinIO credentials; see `.env.production.example`. Pre-load the `models` volume (YOLO + EasyOCR weights), because the internal network has no internet access.
 
 ---
 
-## 🔑 Demo Login Credentials
+## Demo accounts (synthetic)
 
-The platform includes pre-configured role profiles with one-click login buttons on the login screen:
+| Role | Email | Password |
+|---|---|---|
+| Scrutiny officer | scrutiny@aicte-india.org | scrutiny123 |
+| Admin (rules, users, demo controls) | admin@aicte-india.org | admin123 |
+| Expert committee | expert@aicte-india.org | expert123 |
+| Apex Institute (clean) | principal@apex.edu.in | apex123 |
+| Zenith College (problems) | principal@zenith.edu.in | zenith123 |
+| Crescent Institute | principal@crescent.edu.in | crescent123 |
 
-| Role | Email | Password | Access Scope |
-|------|-------|----------|--------------|
-| **AICTE Admin** | `admin@aicte-india.org` | `admin123` | Full administrative control, rule engine editor, system audit log |
-| **Scrutiny Officer** | `scrutiny@aicte-india.org` | `scrutiny123` | Scrutiny review, decision granting, deficiency notices, ELA viewer |
-| **Institution Principal** | `principal@apex.edu.in` | `apex123` | Application submission, document vault upload, self-healing status |
+Demo accounts are seeded only when `ENVIRONMENT` is not `production`.
 
----
+## 5-minute demo script
 
-## 🧪 Testing the Prototype
-
-1. **Clean Application Walkthrough:**
-   * Log in as Scrutiny Officer.
-   * Open `AICTE-2025-10001` (Apex Institute of Technology & Engineering).
-   * Note low risk score (0%), verified Fire Safety, valid ICAI UDIN, and approved status.
-
-2. **Tampered Document & Deficiency Detection:**
-   * Open `AICTE-2025-88402` (Zenith College of Engineering).
-   * Click **Run AI Scrutiny**.
-   * The platform flags:
-     - 🔴 **Expired Fire Safety Certificate** (expired on 15/03/2023).
-     - 🔴 **Missing Mandatory Document** (Land Title Deed not provided).
-     - 🔴 **Forgery Flag** with Error Level Analysis (ELA) heatmap viewer.
-   * Click **Issue Deficiency Notice** to trigger the automated remediation workflow.
-
-3. **Infrastructure Studio:**
-   * Navigate to **Infra CV Studio**.
-   * Upload a laboratory photograph.
-   * YOLOv8 identifies and tallies computer terminals, fire extinguishers, and student seating with pass/deficient flags.
+1. **Scrutiny officer → Dashboard.** Live counts, critical alerts first.
+2. **Zenith (risk 100).** The AI advises "deficiency suspected" and explains why ("Why this score?"). Then go through the findings:
+   * the Fire NOC date was altered: a white box hides `15/03/2025` and `31/12/2027` is typed on top in another font;
+   * the issuer-signed QR still says 2025-03-15, and the fire department's registry agrees;
+   * the audit report reuses Apex's UDIN;
+   * the university NOC expired;
+   * faculty 9 vs 15 required;
+   * the land deed is missing;
+   * the lab photo is a copy of Crescent's;
+   * TER fee unpaid and an open deficiency on AICTE records.
+3. **Document review.** The red box sits on the altered date, and the field-by-field comparison sits next to the page. Use ←/→ to move between documents.
+4. **Admin → Rules Engine.** Change a threshold (e.g. land ≥ 2.5 → 15 acres) with a reason, re-run screening, and the finding changes. History shows v1 → v2.
+5. **Admin → Administration → Simulate outage**, then re-verify a document: "source unavailable, retry scheduled". Restore and re-verify: it verifies.
+6. **Officer → Issue deficiency notice** (pick items, 7 days). Then sign in as **Zenith**: the notice is in the inbox with "what to do" per item. Replace one document and resubmit.
+7. **Officer → Record decision.** Approving against the AI advice requires a reason. **Audit Ledger → Verify chain integrity** confirms the chain is intact.
 
 ---
 
-## 🛡️ License
+## Evaluation and tests
 
-Built for Smart India Hackathon 2024. All rights reserved by Team *We Aren't Robots*.
+```bash
+cd backend
+python -m pytest -q                  # 34 tests: access control, workflow, forensics, QR, statuses, rules, audit chain
+python ../scripts/evaluate.py        # writes EVALUATION.md (add --quick to skip scanned-document OCR)
+```
+
+Latest results on the labelled synthetic set are in [EVALUATION.md](EVALUATION.md):
+* PDF tampering: 20/20 detected, 0 false positives on 20 clean PDFs.
+* Scans: 0 false positives, but recall 0.35. Digital pastes on noisy scans are caught; low-noise pastes and low-quality splices are not.
+* Digital-PDF field extraction: 100%. Scanned OCR reads dates well but misreads separators in IDs, so OCR-read identifiers never produce an automatic "mismatch".
+* Duplicate photos: 15/15 detected, 0 false matches.
+* Verification statuses: 14/14 correct.
+
+These are synthetic-set numbers, not real-world accuracy claims.
+
+## Integrating with the AICTE portal
+
+* REST API with OpenAPI at `/docs`. The portal can create applications, upload documents (async; poll `/api/documents/{id}/status`), fetch `/api/validation/report/{id}` (evidence-linked JSON) and `/api/compliance/check/{id}`.
+* Issuing authorities and AICTE records are reached only through `services/connectors.py`. Replace the simulated adapter with DigiLocker / API Setu / ICAI / state-portal connectors without touching validation logic. Only the identifier being verified is sent out.
+* Signed QR format: `VALIDEX1:` + base64(JSON `{iss, data, sig}`), Ed25519 over `{iss, data}`. Issuers publish their public key (`/mock-authority/{issuer}/public-key`).
+
+## Safeguards built in
+
+* AI output is advisory. The AI never sets a final status; screening only moves `submitted → under_review`.
+* Adverse decisions, and decisions that differ from the AI advice, need a written reason. Experts cannot approve or reject.
+* Forgery findings are worded as "possible alteration — needs verification" and carry their evidence.
+* Rules are data, versioned and audited; findings record the rule code and version applied.
+* Every upload, check, source response, rule change, notice, document view and decision is in the hash-chained ledger (`/api/audit/verify-chain`).
+
+## Known limits and next steps
+
+* Pixel forensics on heavily compressed, low-noise scans is weak; QR and registry verification is the stronger control.
+* YOLOv8n uses COCO classes (monitors appear as "tv"). A model fine-tuned on lab equipment would improve counts; fire extinguishers and projectors are currently "manual check".
+* Room dimensions from photos are not estimated; classroom areas come from the sanctioned plan.
+* Not implemented from the stretch list: presigned multipart uploads, page streaming, WebSocket progress (the UI polls), Postgres row-level security, regional-language UI.
+
+## Project layout
+
+```
+backend/app/api/            REST endpoints (auth, applications, documents, validation, verification, compliance, audit, notifications, admin)
+backend/app/services/       pipeline, rule engine, validation, verification, connectors, matching, duplicates, notifications, retention, audit
+backend/app/ml/             OCR, extraction, forensics, QR verification, perceptual hash, infrastructure CV
+backend/app/mock_authority/ simulated issuing authorities + AICTE records (registry.json), issuer keys
+backend/tests/              pytest suite
+scripts/                    synthetic document factory, demo seeding, evaluation
+frontend/src/               React app (pages, DocumentReview, UploadSlots, ui kit)
+```

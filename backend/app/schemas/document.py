@@ -3,11 +3,13 @@
 from uuid import UUID
 from datetime import datetime
 from typing import Any
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from app.models.document import DocumentType, DocumentStatus
 
 
 class DocumentResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: UUID
     application_id: UUID
     doc_type: DocumentType
@@ -17,13 +19,14 @@ class DocumentResponse(BaseModel):
     status: DocumentStatus
     extracted_data: dict[str, Any]
     page_count: int
+    processing_stage: str | None = None
+    processing_progress: int | None = None
+    is_current: bool = True
+    superseded_by_id: UUID | None = None
     uploaded_at: datetime
-
-    class Config:
-        from_attributes = True
 
 
 class DocumentDetailResponse(DocumentResponse):
-    download_url: str | None = None
-    validation_count: int = 0
-    verification_count: int = 0
+    verifications: list[dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
+    versions: list[dict[str, Any]] = []

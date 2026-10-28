@@ -6,58 +6,50 @@ import { LoginPage } from './pages/LoginPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { ApplicationsPage } from './pages/ApplicationsPage';
 import { ApplicationDetailPage } from './pages/ApplicationDetailPage';
-import { DocumentsPage } from './pages/DocumentsPage';
 import { CompliancePage } from './pages/CompliancePage';
 import { InfrastructurePage } from './pages/InfrastructurePage';
 import { AuditPage } from './pages/AuditPage';
+import { AdminPage } from './pages/AdminPage';
+import { InstitutionHomePage } from './pages/InstitutionHomePage';
+import { NoticesPage } from './pages/NoticesPage';
+import type { UserRole } from './types';
 
-const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { isAuthenticated, isLoading } = useAuth();
-
+const Protected: React.FC<{ children: React.ReactNode; roles?: UserRole[] }> = ({ children, roles }) => {
+  const { user, isLoading } = useAuth();
   if (isLoading) {
-    return (
-      <div className="min-h-screen w-full flex items-center justify-center bg-slate-50 text-slate-600 text-sm font-medium">
-        Verifying security token...
-      </div>
-    );
+    return <div className="min-h-screen w-full flex items-center justify-center bg-slate-50 text-slate-600 text-sm font-medium">Verifying session…</div>;
   }
-
-  if (!isAuthenticated) {
-    return <Navigate to="/login" replace />;
-  }
-
+  if (!user) return <Navigate to="/login" replace />;
+  if (roles && !roles.includes(user.role)) return <Navigate to="/" replace />;
   return <>{children}</>;
 };
 
-export const App: React.FC = () => {
-  return (
-    <AuthProvider>
-      <BrowserRouter>
-        <Routes>
-          <Route path="/login" element={<LoginPage />} />
-
-          <Route
-            path="/"
-            element={
-              <ProtectedRoute>
-                <DashboardLayout />
-              </ProtectedRoute>
-            }
-          >
-            <Route index element={<DashboardPage />} />
-            <Route path="applications" element={<ApplicationsPage />} />
-            <Route path="applications/:id" element={<ApplicationDetailPage />} />
-            <Route path="documents" element={<DocumentsPage />} />
-            <Route path="compliance" element={<CompliancePage />} />
-            <Route path="infrastructure" element={<InfrastructurePage />} />
-            <Route path="audit" element={<AuditPage />} />
-          </Route>
-
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
-      </BrowserRouter>
-    </AuthProvider>
-  );
+const Home: React.FC = () => {
+  const { user } = useAuth();
+  return user?.role === 'institution' ? <InstitutionHomePage /> : <DashboardPage />;
 };
+
+const OFFICIALS: UserRole[] = ['admin', 'scrutiny', 'expert'];
+
+export const App: React.FC = () => (
+  <AuthProvider>
+    <BrowserRouter>
+      <Routes>
+        <Route path="/login" element={<LoginPage />} />
+        <Route path="/" element={<Protected><DashboardLayout /></Protected>}>
+          <Route index element={<Home />} />
+          <Route path="applications" element={<Protected roles={OFFICIALS}><ApplicationsPage /></Protected>} />
+          <Route path="applications/:id" element={<ApplicationDetailPage />} />
+          <Route path="notices" element={<Protected roles={['institution']}><NoticesPage /></Protected>} />
+          <Route path="compliance" element={<CompliancePage />} />
+          <Route path="infrastructure" element={<Protected roles={OFFICIALS}><InfrastructurePage /></Protected>} />
+          <Route path="audit" element={<Protected roles={OFFICIALS}><AuditPage /></Protected>} />
+          <Route path="admin" element={<Protected roles={['admin']}><AdminPage /></Protected>} />
+        </Route>
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </BrowserRouter>
+  </AuthProvider>
+);
 
 export default App;

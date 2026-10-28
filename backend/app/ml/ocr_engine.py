@@ -1,118 +1,236 @@
-"""Dual-engine OCR processing module with PaddleOCR, PyMuPDF, and Tesseract support."""
+"""OCR: native PDF text first, then EasyOCR (with OpenCV preprocessing) for scans and photos.
+
+Fallback order for raster input: EasyOCR -> PaddleOCR -> Tesseract. If no engine is available
+the result has empty text and zero confidence, which the validator reports as
+"manual review required" instead of inventing data.
+"""
 
 import io
 import os
 import logging
 from typing import Any
+
+import numpy as np
 from PIL import Image
 
 logger = logging.getLogger(__name__)
 
+try:
+    import cv2
+    HAS_OPENCV = True
+except ImportError:  # pragma: no cover
+    HAS_OPENCV = False
+
 
 class OCRResult:
-    def __init__(self, text: str, confidence: float = 0.95, bounding_boxes: list[dict] = None):
+    def __init__(self, text: str, confidence: float, engine: str, words: list[dict] | None = None, page_count: int = 1):
         self.text = text
         self.confidence = confidence
-        self.bounding_boxes = bounding_boxes or []
+        self.engine = engine
+        self.words = words or []  # [{"text", "bbox": [x0,y0,x1,y1], "page", "confidence"}]
+        self.page_count = page_count
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "text": self.text,
-            "confidence": self.confidence,
-            "bounding_boxes": self.bounding_boxes,
-        }
+        return {"text": self.text, "confidence": self.confidence, "engine": self.engine, "page_count": self.page_count}
+
+
+def preprocess(image: Image.Image) -> np.ndarray:
+    """Grayscale, upscale small scans, denoise, deskew and binarise."""
+    img = np.array(image.convert("L"))
+    if not HAS_OPENCV:
+        return img
+    h, w = img.shape
+    if max(h, w) < 1500:
+        scale = 1500 / max(h, w)
+        img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+    img = cv2.fastNlMeansDenoising(img, h=10)
+    # Deskew using the minimum-area rectangle of dark pixels
+    coords = np.column_stack(np.where(img < 128))
+    if len(coords) > 100:
+        angle = cv2.minAreaRect(coords.astype(np.float32))[-1]
+        angle = -(90 + angle) if angle < -45 else -angle
+        if angle > 45:
+            angle -= 90
+        if 0.3 < abs(angle) < 15:
+            hh, ww = img.shape
+            m = cv2.getRotationMatrix2D((ww / 2, hh / 2), angle, 1.0)
+            img = cv2.warpAffine(img, m, (ww, hh), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+    img = cv2.adaptiveThreshold(img, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 15)
+    return img
+
+
+def visible_text(page) -> tuple[str, list[dict]]:
+    """Text a reader actually sees: drops characters hidden under a later white box or later text.
+
+    Plain PDF text extraction also returns text that was covered up during an edit, which would make
+    the validator read the *original* value instead of the altered one shown on the page.
+    """
+    try:
+        trace = page.get_texttrace()
+    except Exception:
+        return page.get_text(), []
+    covers = [(d["rect"], d.get("seqno", 0)) for d in page.get_drawings()
+              if d.get("fill") and min(d["fill"]) > 0.95 and (d.get("fill_opacity") or 1) > 0.9]
+    spans = [(tuple(s["bbox"]), s.get("seqno", 0)) for s in trace]
+
+    chars = []
+    for s in trace:
+        seq, size = s.get("seqno", 0), s.get("size", 10)
+        for c in s.get("chars", []):
+            if c[0] < 32:
+                continue
+            x0, y0, x1, y1 = c[3]
+            cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+            hidden = any(r.x0 <= cx <= r.x1 and r.y0 <= cy <= r.y1 and q > seq for r, q in covers) or any(
+                b[0] <= cx <= b[2] and b[1] <= cy <= b[3] and q > seq for b, q in spans)
+            if not hidden:
+                chars.append((chr(c[0]), (x0, y0, x1, y1), size))
+
+    chars.sort(key=lambda ch: (round(ch[1][3], 0), ch[1][0]))
+    lines: list[list] = []
+    for ch in chars:
+        if lines and abs(lines[-1][0][1][3] - ch[1][3]) < 0.5 * ch[2]:
+            lines[-1].append(ch)
+        else:
+            lines.append([ch])
+
+    text_lines, words = [], []
+    for line in lines:
+        line.sort(key=lambda ch: ch[1][0])
+        buf, prev, word = "", None, None
+        for ch, box, size in line:
+            gap = box[0] - prev[2] if prev else 0
+            if prev and gap > 0.2 * size and ch != " " and not buf.endswith(" "):
+                buf += " "
+            buf += ch
+            if ch == " " or (prev and gap > 0.2 * size):
+                if word and word["text"].strip():
+                    words.append(word)
+                word = None
+            if ch != " ":
+                if word is None:
+                    word = {"text": ch, "bbox": list(box), "confidence": 1.0, "unit": "pt"}
+                else:
+                    word["text"] += ch
+                    word["bbox"][2], word["bbox"][3] = max(word["bbox"][2], box[2]), max(word["bbox"][3], box[3])
+            prev = box
+        if word and word["text"].strip():
+            words.append(word)
+        text_lines.append(buf.strip())
+    return "\n".join(text_lines), words
 
 
 class OCREngine:
-    """Intelligent OCR Engine with multi-layer fallback strategy:
-    1. Direct PDF digital text extraction (instant & 100% accurate for digital PDFs)
-    2. PaddleOCR for scanned and rotated documents
-    3. Tesseract OCR as lightweight secondary fallback
-    """
-
     def __init__(self):
+        self._easy = None
+        self._easy_tried = False
         self._paddle = None
-        self._paddle_initialized = False
+        self._paddle_tried = False
 
-    def _get_paddle(self):
-        if not self._paddle_initialized:
+    def _easyocr(self):
+        if not self._easy_tried:
+            self._easy_tried = True
+            try:
+                import easyocr
+                from app.ml.infrastructure_cv import MODEL_DIR
+                model_dir = os.path.join(MODEL_DIR, "easyocr")
+                os.makedirs(model_dir, exist_ok=True)
+                self._easy = easyocr.Reader(["en"], gpu=False, verbose=False, model_storage_directory=model_dir)
+                logger.info("EasyOCR initialised.")
+            except Exception as e:
+                logger.warning(f"EasyOCR unavailable: {e}")
+        return self._easy
+
+    def _paddleocr(self):
+        if not self._paddle_tried:
+            self._paddle_tried = True
             try:
                 from paddleocr import PaddleOCR
                 self._paddle = PaddleOCR(use_angle_cls=True, lang="en", show_log=False)
-                logger.info("PaddleOCR initialized successfully.")
             except Exception as e:
-                logger.warning(f"PaddleOCR initialization failed: {e}. Falling back to Tesseract/PyMuPDF.")
-                self._paddle = None
-            self._paddle_initialized = True
+                logger.info(f"PaddleOCR unavailable: {e}")
         return self._paddle
 
+    def extract(self, file_bytes: bytes, is_pdf: bool) -> OCRResult:
+        return self.extract_from_pdf_bytes(file_bytes) if is_pdf else self.extract_from_image_bytes(file_bytes)
+
     def extract_from_pdf_bytes(self, pdf_bytes: bytes) -> OCRResult:
-        """Extract text from PDF, first trying native digital text, then rendering pages to OCR."""
+        import fitz
+
         try:
-            import fitz  # PyMuPDF
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-            extracted_pages = []
-            has_native_text = False
-
-            for page_index in range(len(doc)):
-                page = doc[page_index]
-                page_text = page.get_text()
-                if page_text and len(page_text.strip()) > 30:
-                    has_native_text = True
-                    extracted_pages.append(page_text)
-                else:
-                    # Page is likely a scanned image, render to pixmap
-                    pix = page.get_pixmap(dpi=200)
-                    img_data = pix.tobytes("png")
-                    img = Image.open(io.BytesIO(img_data))
-                    page_result = self.extract_from_image(img)
-                    extracted_pages.append(page_result.text)
-
-            full_text = "\n\n--- Page Break ---\n\n".join(extracted_pages)
-            confidence = 0.98 if has_native_text else 0.88
-            return OCRResult(text=full_text, confidence=confidence)
         except Exception as e:
-            logger.error(f"Error in extract_from_pdf_bytes: {e}")
-            return self._tesseract_or_dummy_fallback(pdf_bytes)
+            logger.error(f"Unreadable PDF: {e}")
+            return OCRResult("", 0.0, "none")
+
+        pages, words, confidences, engines = [], [], [], set()
+        for page_index, page in enumerate(doc):
+            native, page_words = visible_text(page)
+            if native and len(native.strip()) > 30:
+                pages.append(native)
+                confidences.append(0.99)
+                engines.add("pdf-native")
+                words += [{**w, "page": page_index} for w in page_words]
+            else:
+                pix = page.get_pixmap(dpi=200)
+                res = self.extract_from_image(Image.open(io.BytesIO(pix.tobytes("png"))))
+                pages.append(res.text)
+                confidences.append(res.confidence)
+                engines.add(res.engine)
+                scale = 72 / 200
+                for wd in res.words:
+                    x0, y0, x1, y1 = wd["bbox"]
+                    words.append({**wd, "bbox": [x0 * scale, y0 * scale, x1 * scale, y1 * scale], "page": page_index, "unit": "pt"})
+
+        text = "\n\n--- Page Break ---\n\n".join(pages)
+        conf = float(sum(confidences) / len(confidences)) if confidences else 0.0
+        return OCRResult(text, round(conf, 3), "+".join(sorted(engines)) or "none", words, page_count=len(doc))
+
+    def extract_from_image_bytes(self, file_bytes: bytes) -> OCRResult:
+        try:
+            image = Image.open(io.BytesIO(file_bytes))
+        except Exception:
+            return OCRResult("", 0.0, "none")
+        return self.extract_from_image(image)
 
     def extract_from_image(self, image: Image.Image) -> OCRResult:
-        """Extract text from a PIL Image."""
-        paddle = self._get_paddle()
-        if paddle:
-            try:
-                import numpy as np
-                img_np = np.array(image.convert("RGB"))
-                results = paddle.ocr(img_np, cls=True)
-                lines = []
-                confidences = []
-                boxes = []
-                if results and len(results) > 0 and results[0]:
-                    for line in results[0]:
-                        bbox, (text, conf) = line
-                        lines.append(text)
-                        confidences.append(conf)
-                        boxes.append({"text": text, "bbox": bbox, "confidence": float(conf)})
-                combined_text = "\n".join(lines)
-                avg_conf = sum(confidences) / len(confidences) if confidences else 0.9
-                return OCRResult(text=combined_text, confidence=avg_conf, bounding_boxes=boxes)
-            except Exception as e:
-                logger.warning(f"PaddleOCR inference failed: {e}. Using fallback.")
+        prepared = preprocess(image)
+        sx = prepared.shape[1] / image.width
+        sy = prepared.shape[0] / image.height
 
-        # Secondary fallback: pytesseract
+        reader = self._easyocr()
+        if reader is not None:
+            try:
+                results = reader.readtext(prepared, detail=1, paragraph=False)
+                words, lines, confs = [], [], []
+                for bbox, text, conf in results:
+                    xs, ys = [p[0] for p in bbox], [p[1] for p in bbox]
+                    words.append({"text": text, "bbox": [min(xs) / sx, min(ys) / sy, max(xs) / sx, max(ys) / sy],
+                                  "confidence": float(conf), "page": 0, "unit": "px"})
+                    lines.append(text)
+                    confs.append(float(conf))
+                return OCRResult("\n".join(lines), round(float(np.mean(confs)) if confs else 0.0, 3), "easyocr", words)
+            except Exception as e:
+                logger.warning(f"EasyOCR inference failed: {e}")
+
+        paddle = self._paddleocr()
+        if paddle is not None:
+            try:
+                results = paddle.ocr(np.array(image.convert("RGB")), cls=True)
+                lines, confs = [], []
+                for bbox, (text, conf) in (results[0] or []):
+                    lines.append(text)
+                    confs.append(conf)
+                return OCRResult("\n".join(lines), float(np.mean(confs)) if confs else 0.0, "paddleocr")
+            except Exception as e:
+                logger.warning(f"PaddleOCR inference failed: {e}")
+
         try:
             import pytesseract
-            text = pytesseract.image_to_string(image)
-            return OCRResult(text=text, confidence=0.85)
+            return OCRResult(pytesseract.image_to_string(prepared), 0.8, "tesseract")
         except Exception:
-            return OCRResult(text="", confidence=0.0)
-
-    def _tesseract_or_dummy_fallback(self, file_bytes: bytes) -> OCRResult:
-        try:
-            from PIL import Image
-            image = Image.open(io.BytesIO(file_bytes))
-            return self.extract_from_image(image)
-        except Exception:
-            return OCRResult(text="Standard Institutional Document", confidence=0.7)
+            logger.warning("No OCR engine available for raster input; returning empty text.")
+            return OCRResult("", 0.0, "none")
 
 
 ocr_engine = OCREngine()

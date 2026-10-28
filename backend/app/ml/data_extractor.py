@@ -1,8 +1,30 @@
-"""Structured field extraction engine using regular expressions, entities, and pattern matchers."""
+"""Structured field extraction from OCR text using domain-specific patterns.
+
+Every extracted date also gets an ISO twin (e.g. valid_until -> valid_until_iso) so rules
+can compare dates regardless of the printed format.
+"""
 
 import re
 from typing import Any
+
+from app.ml.dates import DATE_PATTERN, to_iso
 from app.models.document import DocumentType
+
+NAME_LINE = r"([A-Z][A-Za-z.&,'\- ]{3,120}?)"
+
+
+def _search(pattern: str, text: str, flags=re.IGNORECASE) -> str | None:
+    m = re.search(pattern, text, flags)
+    return m.group(1).strip(" .,:;") if m else None
+
+
+def _num(value: str | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value.replace(",", ""))
+    except ValueError:
+        return None
 
 
 class DataExtractor:
@@ -10,225 +32,132 @@ class DataExtractor:
 
     def extract_fields(self, text: str, doc_type: DocumentType) -> dict[str, Any]:
         extracted: dict[str, Any] = {}
-
-        if doc_type == DocumentType.FIRE_SAFETY:
-            extracted.update(self._extract_fire_safety(text))
-        elif doc_type == DocumentType.AUDIT_REPORT:
-            extracted.update(self._extract_audit_report(text))
-        elif doc_type == DocumentType.LAND_DOCUMENT:
-            extracted.update(self._extract_land_document(text))
-        elif doc_type == DocumentType.FACULTY_LIST:
-            extracted.update(self._extract_faculty_list(text))
-        elif doc_type == DocumentType.AFFIDAVIT:
-            extracted.update(self._extract_affidavit(text))
-        elif doc_type == DocumentType.BUILDING_PLAN:
-            extracted.update(self._extract_building_plan(text))
-        elif doc_type == DocumentType.NOC:
-            extracted.update(self._extract_noc(text))
-
-        # Common extraction across all docs
+        handler = {
+            DocumentType.FIRE_SAFETY: self._extract_fire_safety,
+            DocumentType.AUDIT_REPORT: self._extract_audit_report,
+            DocumentType.LAND_DOCUMENT: self._extract_land_document,
+            DocumentType.FACULTY_LIST: self._extract_faculty_list,
+            DocumentType.AFFIDAVIT: self._extract_affidavit,
+            DocumentType.BUILDING_PLAN: self._extract_building_plan,
+            DocumentType.NOC: self._extract_noc,
+        }.get(doc_type)
+        if handler:
+            extracted.update({k: v for k, v in handler(text).items() if v not in (None, "", [])})
         extracted.update(self._extract_common(text))
+
+        for key in [k for k in extracted if k.endswith(("_date", "valid_until")) and isinstance(extracted[k], str)]:
+            iso = to_iso(extracted[key])
+            if iso:
+                extracted[f"{key}_iso"] = iso
         return extracted
 
     def _extract_common(self, text: str) -> dict[str, Any]:
-        common = {}
-        # Dates (DD/MM/YYYY or DD-MM-YYYY)
-        dates = re.findall(r"\b(\d{1,2}[/-]\d{1,2}[/-]\d{4})\b", text)
+        common: dict[str, Any] = {}
+        dates = re.findall(DATE_PATTERN, text, re.IGNORECASE)
         if dates:
-            common["detected_dates"] = dates[:5]
-
-        # Pin codes
+            common["detected_dates"] = dates[:8]
         pincodes = re.findall(r"\b([1-9][0-9]{5})\b", text)
         if pincodes:
-            common["pincodes"] = list(set(pincodes))
-
+            common["pincodes"] = sorted(set(pincodes))
         return common
 
+    def _holder(self, text: str) -> str | None:
+        return _search(
+            r"(?:certified that|issued to|in favour of|institution name|name of (?:the )?institution)"
+            r"[:\s]+(?:the\s+)?(?:educational building\s+(?:of\s+)?)?" + NAME_LINE + r"(?:\s*,|\s+located|\s+situated|\n|$)",
+            text,
+        )
+
     def _extract_fire_safety(self, text: str) -> dict[str, Any]:
-        data = {}
-        # Certificate Number
-        cert_match = re.search(
-            r"(?:Certificate|NOC|Ref|Licence)\s*(?:No|Number|#)[:\s.]*([A-Za-z0-9/\-_]+)",
-            text,
-            re.IGNORECASE,
-        )
-        if cert_match:
-            data["certificate_number"] = cert_match.group(1).strip()
-
-        # Valid until
-        valid_match = re.search(
-            r"(?:Valid\s*(?:Up\s*to|Until|thru|through)|Expiry\s*Date)[:\s.]*(\d{1,2}[/-]\d{1,2}[/-]\d{4})",
-            text,
-            re.IGNORECASE,
-        )
-        if valid_match:
-            data["valid_until"] = valid_match.group(1).strip()
-
-        # Issue date
-        issue_match = re.search(
-            r"(?:Date\s*of\s*Issue|Issued\s*on|Date)[:\s.]*(\d{1,2}[/-]\d{1,2}[/-]\d{4})",
-            text,
-            re.IGNORECASE,
-        )
-        if issue_match:
-            data["issue_date"] = issue_match.group(1).strip()
-
-        # Issuing Authority
-        auth_match = re.search(
-            r"(?:Issued\s*by|Office\s*of\s*the|Authority)[:\s.]*([^\n\r,]+(?:Fire|Services|Department|Officer)[^\n\r]*)",
-            text,
-            re.IGNORECASE,
-        )
-        if auth_match:
-            data["issuing_authority"] = auth_match.group(1).strip()
-        else:
-            data["issuing_authority"] = "State Fire & Emergency Services"
-
-        return data
+        return {
+            "certificate_number": _search(r"(?:Certificate|NOC|Ref|Licence)\s*(?:No|Number|#)\.?[:\s]*([A-Za-z0-9/\-_]{4,})", text),
+            "valid_until": _search(r"(?:Valid\s*(?:Up\s*to|Upto|Until|till|thru|through)|Expiry\s*Date|Date\s*of\s*Expiry)[:\s.]*" + DATE_PATTERN, text),
+            "issue_date": _search(r"(?:Date\s*of\s*Issue|Issued\s*on|Issue\s*Date)[:\s.]*" + DATE_PATTERN, text),
+            "holder": self._holder(text),
+            "issuing_authority": _search(r"(?:Issued\s*by|Office\s*of\s*the)[:\s.]*([^\n\r]+)", text),
+        }
 
     def _extract_audit_report(self, text: str) -> dict[str, Any]:
-        data = {}
-        # Financial Year
-        fy_match = re.search(
-            r"(?:Financial\s*Year|F\.?Y\.?)[:\s.]*(\d{4}[-–]\d{2,4})",
-            text,
-            re.IGNORECASE,
-        )
-        if fy_match:
-            data["financial_year"] = fy_match.group(1).strip()
-
-        # UDIN (Unique Document Identification Number - 18 digits)
-        udin_match = re.search(r"\b(\d{2}[A-Za-z0-9]{16})\b", text)
-        if udin_match:
-            data["udin"] = udin_match.group(1)
-
-        # CA Membership Number
-        ca_mem_match = re.search(
-            r"(?:Membership\s*(?:No|Number)|M\.?No)[:\s.]*(\d{5,8})",
-            text,
-            re.IGNORECASE,
-        )
-        if ca_mem_match:
-            data["ca_membership_no"] = ca_mem_match.group(1)
-
-        # Total Income / Receipts
-        income_match = re.search(
-            r"(?:Total\s*(?:Income|Receipts|Revenue)|Gross\s*Income)[:\s₹Rs.]*([\d,]+(?:\.\d{2})?)",
-            text,
-            re.IGNORECASE,
-        )
-        if income_match:
-            data["total_income"] = income_match.group(1).replace(",", "")
-
-        # Total Expenditure
-        exp_match = re.search(
-            r"(?:Total\s*(?:Expenditure|Expenses)|Gross\s*Expenses)[:\s₹Rs.]*([\d,]+(?:\.\d{2})?)",
-            text,
-            re.IGNORECASE,
-        )
-        if exp_match:
-            data["total_expenditure"] = exp_match.group(1).replace(",", "")
-
-        return data
+        income = _search(r"(?:Total\s*(?:Income|Receipts|Revenue)|Gross\s*Income)[:\s₹Rs.]*([\d,]+(?:\.\d{2})?)", text)
+        expense = _search(r"(?:Total\s*(?:Expenditure|Expenses)|Gross\s*Expenses)[:\s₹Rs.]*([\d,]+(?:\.\d{2})?)", text)
+        return {
+            "financial_year": _search(r"(?:Financial\s*Year|F\.?Y\.?)[:\s.]*(\d{4}\s*[-–]\s*\d{2,4})", text),
+            # ICAI UDIN: 2-digit year + 6-digit membership no + 10 alphanumerics
+            "udin": _search(r"UDIN[:\s]*([0-9]{8}[A-Z0-9]{10})\b", text) or _search(r"\b([0-9]{8}[A-Z]{2}[A-Z0-9]{8})\b", text, 0),
+            "ca_membership_no": _search(r"(?:Membership\s*(?:No|Number)|M\.?\s?No)\.?[:\s]*(\d{5,8})", text),
+            "client_name": _search(r"(?:To the (?:Governing Body|Members|Trustees) of)\s+" + NAME_LINE + r"(?:\n|$|,)", text),
+            "total_income": income.replace(",", "") if income else None,
+            "total_expenditure": expense.replace(",", "") if expense else None,
+        }
 
     def _extract_land_document(self, text: str) -> dict[str, Any]:
-        data = {}
-        # Land Area (acres / hectares / sq meters)
-        area_match = re.search(
-            r"(\d+(?:\.\d+)?)\s*(?:Acres|Hectares|Sq\.\s*Meters|Square\s*Meters)",
-            text,
-            re.IGNORECASE,
-        )
-        if area_match:
-            data["land_area"] = area_match.group(0)
-
-        # Survey / Khasra Numbers
-        survey_match = re.search(
-            r"(?:Survey\s*No|Khasra\s*No|Khatauni)[:\s.]*([A-Za-z0-9,/\-\s]+)",
-            text,
-            re.IGNORECASE,
-        )
-        if survey_match:
-            data["survey_numbers"] = survey_match.group(1).strip()
-
-        # Deed Registration Number
-        deed_match = re.search(
-            r"(?:Document|Deed|Registration)\s*(?:No|Number)[:\s.]*([A-Za-z0-9/\-_]+)",
-            text,
-            re.IGNORECASE,
-        )
-        if deed_match:
-            data["deed_number"] = deed_match.group(1).strip()
-
+        data: dict[str, Any] = {
+            "deed_number": _search(r"(?:Document|Deed|Registration)\s*(?:No|Number)\.?[:\s]*([A-Za-z0-9/\-_]{4,})", text),
+            "survey_numbers": _search(r"(?:Survey\s*No|Khasra\s*No)\.?[:\s]*([0-9][0-9A-Za-z,/\- ]*)", text),
+            "owner": _search(r"(?:in favour of|Registered\s+owner|Purchaser)[:\s]+" + NAME_LINE + r"(?:\.|\n|$|,)", text),
+        }
+        m = re.search(r"(\d+(?:\.\d+)?)\s*(Acres?|Hectares?|Sq\.?\s*(?:Meters|Metres|m))\b", text, re.IGNORECASE)
+        if m:
+            value, unit = float(m.group(1)), m.group(2).lower()
+            acres = value if unit.startswith("acre") else value * 2.47105 if unit.startswith("hect") else value / 4046.86
+            data["land_area"] = m.group(0)
+            data["land_area_acres"] = round(acres, 2)
         return data
 
     def _extract_faculty_list(self, text: str) -> dict[str, Any]:
-        data = {}
-        # Count occurrences of academic designations
-        professors = len(re.findall(r"\bProfessor\b", text, re.IGNORECASE))
-        assoc_profs = len(re.findall(r"\bAssociate\s+Professor\b", text, re.IGNORECASE))
-        asst_profs = len(re.findall(r"\bAssistant\s+Professor\b", text, re.IGNORECASE))
-        phds = len(re.findall(r"\bPh\.?D\b", text, re.IGNORECASE))
+        def stated(label: str) -> int | None:
+            v = _search(rf"(?<!Associate )(?<!Assistant ){label}s?\s*[:\-]\s*(\d+)", text)
+            return int(v) if v else None
 
-        data["professors_count"] = max(professors - assoc_profs - asst_profs, 0)
-        data["associate_professors_count"] = assoc_profs
-        data["assistant_professors_count"] = asst_profs
-        data["total_faculty_detected"] = professors + asst_profs
-        data["phd_qualified_count"] = phds
-
-        return data
+        prof = stated("Professor")
+        assoc = stated("Associate Professor")
+        asst = stated("Assistant Professor")
+        if prof is None and assoc is None and asst is None:
+            # Fall back to counting rows that carry a designation
+            assoc = len(re.findall(r"\bAssociate\s+Professor\b", text, re.IGNORECASE))
+            asst = len(re.findall(r"\bAssistant\s+Professor\b", text, re.IGNORECASE))
+            prof = max(len(re.findall(r"\bProfessor\b", text, re.IGNORECASE)) - assoc - asst, 0)
+        prof, assoc, asst = prof or 0, assoc or 0, asst or 0
+        return {
+            "professors_count": prof,
+            "associate_professors_count": assoc,
+            "assistant_professors_count": asst,
+            "total_faculty": prof + assoc + asst,
+            "phd_qualified_count": len(re.findall(r"\bPh\.?\s?D\b", text, re.IGNORECASE)),
+            "institution_name": _search(r"^\s*" + NAME_LINE + r"\s+[—-]\s+(?:APPROVED\s+)?FACULTY", text, re.IGNORECASE | re.MULTILINE),
+        }
 
     def _extract_affidavit(self, text: str) -> dict[str, Any]:
-        data = {}
-        stamp_match = re.search(
-            r"(?:Certificate\s*No|Stamp\s*No|GRN)[:\s.]*([A-Za-z0-9/\-_]+)",
-            text,
-            re.IGNORECASE,
-        )
-        if stamp_match:
-            data["stamp_certificate_no"] = stamp_match.group(1).strip()
-
-        notary_match = re.search(
-            r"(?:Notary\s*Public|Advocate\s*&\s*Notary)[:\s.]*([^\n\r,]+)",
-            text,
-            re.IGNORECASE,
-        )
-        if notary_match:
-            data["notary_name"] = notary_match.group(1).strip()
-
-        return data
+        return {
+            "stamp_certificate_no": _search(r"(?:Stamp\s*Certificate\s*No|Certificate\s*No|Stamp\s*No|GRN)\.?[:\s]*([A-Za-z0-9/\-_]{6,})", text),
+            "notary_name": _search(r"(?:Notary\s*Public|Advocate\s*&\s*Notary)[:\s.]*([^\n\r,]+)", text),
+            "deponent_institution": _search(r"(?:on behalf of|Secretary of|Principal of)\s+" + NAME_LINE + r"(?:,|\n|$)", text),
+            "verified_date": _search(r"(?:Verified at [A-Za-z ]+ on|Dated)[:\s]*" + DATE_PATTERN, text),
+        }
 
     def _extract_building_plan(self, text: str) -> dict[str, Any]:
-        data = {}
-        area_match = re.search(
-            r"(?:Built[- ]?up\s*Area|Carpet\s*Area|Total\s*Area)[:\s.]*([\d,]+(?:\.\d+)?)\s*(?:Sq\.?\s*M(?:trs|eters)?)",
-            text,
-            re.IGNORECASE,
-        )
-        if area_match:
-            data["built_up_area_sqm"] = area_match.group(1).replace(",", "")
-
-        approver_match = re.search(
-            r"(?:Approved\s*by|Sanctioned\s*by)[:\s.]*([^\n\r,]+)",
-            text,
-            re.IGNORECASE,
-        )
-        if approver_match:
-            data["sanctioning_authority"] = approver_match.group(1).strip()
-
-        return data
+        area = _search(r"(?:Built[- ]?up\s*Area|Total\s*Built[- ]?up|Total\s*Area)[:\s.]*([\d,]+(?:\.\d+)?)\s*(?:Sq\.?\s*M)", text)
+        rooms = [
+            {"room": r.strip(), "area_sqm": float(a)}
+            for r, a in re.findall(r"(Classroom[\w\- ]*?)[:\s]+(\d+(?:\.\d+)?)\s*(?:sq\.?\s*m|m2|sqm)", text, re.IGNORECASE)
+        ]
+        return {
+            "approval_number": _search(r"(?:Approval|Sanction|Plan)\s*(?:No|Number)\.?[:\s]*([A-Za-z0-9/\-_]{4,})", text),
+            "built_up_area_sqm": _num(area),
+            "sanctioning_authority": _search(r"(?:Approved\s*by|Sanctioned\s*by)[:\s.]*([^\n\r,]+)", text),
+            "classrooms": rooms,
+            "classroom_count": len(rooms) or None,
+            "min_classroom_area_sqm": min(r["area_sqm"] for r in rooms) if rooms else None,
+        }
 
     def _extract_noc(self, text: str) -> dict[str, Any]:
-        data = {}
-        noc_num = re.search(
-            r"(?:NOC\s*No|Letter\s*No|Ref\s*No)[:\s.]*([A-Za-z0-9/\-_]+)",
-            text,
-            re.IGNORECASE,
-        )
-        if noc_num:
-            data["noc_number"] = noc_num.group(1).strip()
-
-        return data
+        return {
+            "noc_number": _search(r"(?:NOC\s*No|Letter\s*No|Ref\s*No)\.?[:\s]*([A-Za-z0-9/\-_]{4,})", text),
+            "valid_until": _search(r"(?:Valid\s*(?:Up\s*to|Upto|Until|till)|Validity)[:\s.]*" + DATE_PATTERN, text),
+            "issue_date": _search(r"(?:Date\s*of\s*Issue|Dated)[:\s.]*" + DATE_PATTERN, text),
+            "university": _search(r"(" + r"[A-Z][A-Za-z.&,'\- ]{3,120}?University" + r")", text, 0),
+            "holder": self._holder(text),
+        }
 
 
 data_extractor = DataExtractor()

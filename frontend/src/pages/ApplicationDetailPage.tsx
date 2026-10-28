@@ -1,643 +1,347 @@
-import React, { useEffect, useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
-import {
-  ArrowLeft,
-  Play,
-  Upload,
-  AlertTriangle,
-  CheckCircle2,
-  Clock,
-  ShieldAlert,
-  FileText,
-  FileCheck2,
-  Eye,
-  Check,
-  X,
-  Sparkles,
-} from 'lucide-react';
-import {
-  applicationsApi,
-  documentsApi,
-  validationApi,
-  verificationApi,
-  complianceApi,
-  auditApi,
-} from '../api/client';
-import type {
-  Application,
-  ValidationReport,
-  ComplianceEvaluation,
-  DocumentType,
-} from '../types';
+import React, { useCallback, useEffect, useState } from 'react';
+import { Link, useParams } from 'react-router-dom';
+import { ArrowLeft, Play, Gavel, Send, FileWarning, ListChecks, FileSearch, ScrollText, Bell, ShieldCheck, ChevronDown, ChevronUp, Hash } from 'lucide-react';
+import { applicationsApi, auditApi, complianceApi, errorMessage, notificationsApi, validationApi } from '../api/client';
+import type { Application, AuditEntry, ComplianceEvaluation, NotificationItem, ValidationReport, ValidationResult } from '../types';
+import { useAuth } from '../context/AuthContext';
+import { AIPill, AI_LABELS, AdvisoryNote, Button, Card, Empty, Modal, Pill, SeverityIcon, SeverityPill, Spinner, StatusPill, cx, fmtDate, fmtDay } from '../components/ui';
+import { DocumentReview } from '../components/DocumentReview';
+import { UploadSlots } from '../components/UploadSlots';
+import { NoticeCard } from './NoticesPage';
+
+type Tab = 'findings' | 'documents' | 'upload' | 'rules' | 'notices' | 'audit';
+
+const FindingRow: React.FC<{ f: ValidationResult; onOpenDoc?: (id: string) => void; selectable?: boolean; selected?: boolean; onToggle?: () => void }> = ({ f, onOpenDoc, selectable, selected, onToggle }) => {
+  const [open, setOpen] = useState(false);
+  const rows = f.details?.field_comparison as any[] | undefined;
+  return (
+    <div className={cx('p-4 rounded-xl border bg-white', f.severity === 'critical' ? 'border-rose-200' : f.severity === 'warning' ? 'border-amber-200' : 'border-slate-200')}>
+      <div className="flex items-start gap-3">
+        {selectable && <input type="checkbox" checked={selected} onChange={onToggle} className="mt-1" aria-label="Include in notice" />}
+        <SeverityIcon severity={f.severity} className="w-4 h-4 mt-0.5 shrink-0" />
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-semibold text-slate-900">{f.finding}</p>
+          <div className="flex flex-wrap items-center gap-1.5 mt-1">
+            <SeverityPill severity={f.severity} />
+            <Pill>{f.check_type}</Pill>
+            {f.rule_code && <Pill tone="indigo" title="Rule and version applied">{f.rule_code} v{f.rule_version}</Pill>}
+            <span className="text-[11px] text-slate-500">confidence {Math.round(f.confidence * 100)}%</span>
+          </div>
+          {f.fix_hint && <p className="text-xs text-slate-700 mt-2"><span className="font-semibold text-indigo-700">How to fix:</span> {f.fix_hint}</p>}
+          {(f.evidence || rows) && (
+            <button onClick={() => setOpen(!open)} className="text-[11px] font-semibold text-slate-500 hover:text-slate-800 mt-2 inline-flex items-center gap-1 cursor-pointer">
+              {open ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />} Evidence
+            </button>
+          )}
+          {open && (
+            <div className="mt-2 text-xs text-slate-600 bg-slate-50 rounded-lg p-3 space-y-2">
+              {f.evidence && <p className="whitespace-pre-wrap">{f.evidence}</p>}
+              {rows && rows.map((r, i) => <p key={i} className="font-mono text-[11px]">{r.field}: “{String(r.submitted)}” vs “{String(r.official)}” — {r.reason}</p>)}
+            </div>
+          )}
+        </div>
+        {f.document_id && onOpenDoc && <Button variant="ghost" onClick={() => onOpenDoc(f.document_id!)}><FileSearch className="w-3.5 h-3.5" />View</Button>}
+      </div>
+    </div>
+  );
+};
 
 export const ApplicationDetailPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
+  const { user } = useAuth();
+  const isOfficial = user?.role !== 'institution';
   const [app, setApp] = useState<Application | null>(null);
   const [report, setReport] = useState<ValidationReport | null>(null);
   const [compliance, setCompliance] = useState<ComplianceEvaluation | null>(null);
-  const [auditLogs, setAuditLogs] = useState<any[]>([]);
-  const [activeTab, setActiveTab] = useState<'validation' | 'documents' | 'compliance' | 'audit'>('validation');
-  const [loading, setLoading] = useState(true);
-  const [validating, setValidating] = useState(false);
+  const [notices, setNotices] = useState<NotificationItem[]>([]);
+  const [audit, setAudit] = useState<AuditEntry[]>([]);
+  const [tab, setTab] = useState<Tab>(isOfficial ? 'findings' : 'upload');
+  const [focusDoc, setFocusDoc] = useState<string | null>(null);
+  const [busy, setBusy] = useState('');
+  const [error, setError] = useState('');
+  const [showWhy, setShowWhy] = useState(false);
+  const [deciding, setDeciding] = useState(false);
+  const [noticing, setNoticing] = useState(false);
 
-  // Upload modal state
-  const [showUploadModal, setShowUploadModal] = useState(false);
-  const [uploadFile, setUploadFile] = useState<File | null>(null);
-  const [uploadDocType, setUploadDocType] = useState<DocumentType>('fire_safety');
-  const [uploading, setUploading] = useState(false);
-
-  // Forgery Heatmap Preview Modal
-  const [selectedHeatmap, setSelectedHeatmap] = useState<string | null>(null);
-
-  const loadAll = async () => {
+  const load = useCallback(async () => {
     if (!id) return;
-    try {
-      setLoading(true);
-      const appData = await applicationsApi.get(id);
-      setApp(appData);
-
-      const [repData, compData, logData] = await Promise.all([
-        validationApi.getReport(id).catch(() => null),
-        complianceApi.check(id).catch(() => null),
-        auditApi.getAppLogs(id).catch(() => []),
-      ]);
-      setReport(repData);
-      setCompliance(compData);
-      setAuditLogs(logData);
-    } catch (err) {
-      console.error('Failed to load application:', err);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    loadAll();
+    const a = await applicationsApi.get(id);
+    setApp(a);
+    const [r, c, n, au] = await Promise.all([
+      validationApi.getReport(id), complianceApi.check(id), notificationsApi.list(id), auditApi.getAppLogs(id),
+    ]);
+    setReport(r); setCompliance(c); setNotices(n); setAudit(au);
   }, [id]);
 
-  const handleRunValidation = async () => {
-    if (!id) return;
-    setValidating(true);
+  useEffect(() => { load().catch((e) => setError(errorMessage(e))); }, [load]);
+
+  const run = async (label: string, fn: () => Promise<any>) => {
+    setBusy(label);
+    setError('');
     try {
-      await validationApi.trigger(id);
-      await loadAll();
-    } catch (err) {
-      console.error('Validation run failed:', err);
+      await fn();
+      await load();
+    } catch (e) {
+      setError(errorMessage(e));
     } finally {
-      setValidating(false);
+      setBusy('');
     }
   };
 
-  const handleStatusUpdate = async (newStatus: string) => {
-    if (!id) return;
-    try {
-      await applicationsApi.updateStatus(id, newStatus, `Official action updated status to ${newStatus}`);
-      await loadAll();
-    } catch (err) {
-      console.error('Status update failed:', err);
-    }
-  };
+  if (error && !app) return <Empty title="Could not load application" hint={error} />;
+  if (!app) return <div className="flex justify-center p-16"><Spinner /></div>;
 
-  const handleDocumentUpload = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!id || !uploadFile) return;
-    setUploading(true);
-    try {
-      const fd = new FormData();
-      fd.append('application_id', id);
-      fd.append('file', uploadFile);
-      fd.append('doc_type', uploadDocType);
-      await documentsApi.upload(fd);
-      setShowUploadModal(false);
-      setUploadFile(null);
-      await loadAll();
-    } catch (err) {
-      console.error('Upload failed:', err);
-    } finally {
-      setUploading(false);
-    }
-  };
+  const editable = !isOfficial && (app.status === 'draft' || app.status === 'deficiency_found');
+  const decided = app.status === 'approved' || app.status === 'rejected';
+  const findings = report?.findings || [];
+  const counts = report?.summary;
+  const openDoc = (docId: string) => { setFocusDoc(docId); setTab('documents'); };
 
-  const handleTriggerVerification = async (docId: string) => {
-    try {
-      await verificationApi.trigger(docId);
-      await loadAll();
-    } catch (err) {
-      console.error('Verification failed:', err);
-    }
-  };
-
-  if (loading && !app) {
-    return <div className="text-center py-20 text-gray-500">Loading application dossier...</div>;
-  }
-
-  if (!app) {
-    return <div className="text-center py-20 text-rose-500">Application not found</div>;
-  }
+  const tabs: { key: Tab; label: string; icon: React.ElementType; show: boolean }[] = [
+    { key: 'upload', label: 'Checklist & uploads', icon: ListChecks, show: !isOfficial },
+    { key: 'findings', label: `Findings (${findings.length})`, icon: FileWarning, show: true },
+    { key: 'documents', label: 'Document review', icon: FileSearch, show: true },
+    { key: 'rules', label: 'Rules applied', icon: ShieldCheck, show: true },
+    { key: 'notices', label: `Notices (${notices.length})`, icon: Bell, show: true },
+    { key: 'audit', label: 'Audit trail', icon: ScrollText, show: true },
+  ];
 
   return (
-    <div className="space-y-6">
-      {/* Top back navigation & quick breadcrumb */}
-      <div className="flex items-center justify-between">
-        <Link
-          to="/applications"
-          className="inline-flex items-center gap-2 text-xs font-semibold text-slate-500 hover:text-indigo-600 transition-colors"
-        >
-          <ArrowLeft className="w-4 h-4" />
-          <span>Back to Applications List</span>
-        </Link>
-        <span className="text-xs font-mono font-medium text-slate-500">AY {app.academic_year}</span>
-      </div>
+    <div className="space-y-5">
+      <Link to={isOfficial ? '/applications' : '/'} className="inline-flex items-center gap-1 text-xs font-semibold text-slate-500 hover:text-slate-800"><ArrowLeft className="w-3.5 h-3.5" />Back</Link>
 
-      {/* Main Dossier Header Card */}
-      <div className="glass-panel rounded-2xl p-6 md:p-8 relative overflow-hidden border border-slate-200">
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6">
+      <div className="glass-panel rounded-2xl p-6">
+        <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-6">
           <div className="space-y-2">
-            <div className="flex items-center gap-3">
-              <span className="font-mono text-sm font-bold text-indigo-700 px-3 py-1 rounded-lg bg-indigo-50 border border-indigo-200">
-                {app.application_number}
-              </span>
-              <span className="text-xs uppercase font-mono font-semibold px-2.5 py-0.5 rounded bg-slate-100 text-slate-700 border border-slate-200">
-                {app.category.replace('_', ' ')}
-              </span>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-mono text-sm font-bold text-indigo-700 px-3 py-1 rounded-lg bg-indigo-50 border border-indigo-200">{app.application_number}</span>
+              <StatusPill status={app.status} />
+              <Pill>{app.category.replace('_', ' ').toUpperCase()}</Pill>
             </div>
             <h1 className="text-2xl font-bold text-slate-900 tracking-tight">{app.institution_name}</h1>
             <p className="text-xs text-slate-500">
-              Submitted on {new Date(app.submitted_at).toLocaleString()} | Current Status:{' '}
-              <span className="capitalize font-semibold text-slate-800">{app.status.replace('_', ' ')}</span>
+              AICTE ID {app.permanent_id || '—'} · intake {app.requested_intake ?? '—'} · AY {app.academic_year} · submitted {fmtDay(app.submitted_at)}
+              {app.rectification_due && app.status === 'deficiency_found' && <span className="text-rose-600 font-semibold"> · rectify by {fmtDay(app.rectification_due)}</span>}
             </p>
+            {app.overall_verdict && <p className="text-xs text-slate-700"><span className="font-semibold">Official note:</span> {app.overall_verdict} {app.decided_at && <span className="text-slate-400">({fmtDate(app.decided_at)})</span>}</p>}
           </div>
 
-          {/* AI Risk Score Pill & Action Buttons */}
-          <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
-            {/* Risk Score Widget */}
-            <div className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200 flex items-center gap-3">
-              <div className="text-right">
-                <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">AI Risk Score</p>
-                <p
-                  className={`text-2xl font-mono font-bold ${
-                    app.risk_score >= 60
-                      ? 'text-rose-600'
-                      : app.risk_score >= 25
-                      ? 'text-amber-600'
-                      : 'text-emerald-600'
-                  }`}
-                >
-                  {app.risk_score}%
-                </p>
-              </div>
-              <div className="w-12 h-12 rounded-xl bg-white border border-slate-200 flex items-center justify-center shadow-xs">
-                <ShieldAlert
-                  className={`w-6 h-6 ${
-                    app.risk_score >= 60
-                      ? 'text-rose-600'
-                      : app.risk_score >= 25
-                      ? 'text-amber-600'
-                      : 'text-emerald-600'
-                  }`}
-                />
-              </div>
+          <div className="w-full lg:w-96 p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-2">
+            <div className="flex items-center justify-between">
+              <AIPill rec={app.ai_recommendation} />
+              <span className={cx('text-2xl font-mono font-bold', app.risk_score >= 60 ? 'text-rose-600' : app.risk_score >= 25 ? 'text-amber-600' : 'text-emerald-600')} title="Risk score 0-100">{app.risk_score}</span>
             </div>
-
-            {/* Run AI Validation Suite */}
-            <button
-              onClick={handleRunValidation}
-              disabled={validating}
-              className="flex items-center gap-2 px-5 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-xs font-semibold text-white shadow-sm shadow-indigo-600/25 transition-all cursor-pointer disabled:opacity-50"
-            >
-              <Play className={`w-4 h-4 ${validating ? 'animate-spin' : ''}`} />
-              <span>{validating ? 'Running Validation Suite...' : 'Run AI Scrutiny'}</span>
-            </button>
-          </div>
-        </div>
-
-        {/* Official Decision Bar (Human-in-the-Loop Authority) */}
-        <div className="mt-6 pt-6 border-t border-slate-100 flex flex-wrap items-center justify-between gap-4">
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-slate-500 font-medium">Scrutiny Verdict:</span>
-            <span className="text-xs font-semibold text-slate-800">
-              {app.overall_verdict || 'Awaiting preliminary validation report'}
-            </span>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => handleStatusUpdate('approved')}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-300 text-xs font-semibold transition-all cursor-pointer"
-            >
-              <Check className="w-3.5 h-3.5" />
-              <span>Grant Approval</span>
-            </button>
-            <button
-              onClick={() => handleStatusUpdate('deficiency_found')}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-300 text-xs font-semibold transition-all cursor-pointer"
-            >
-              <AlertTriangle className="w-3.5 h-3.5" />
-              <span>Issue Deficiency Notice</span>
-            </button>
-            <button
-              onClick={() => handleStatusUpdate('under_review')}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-700 border border-amber-300 text-xs font-semibold transition-all cursor-pointer"
-            >
-              <Clock className="w-3.5 h-3.5" />
-              <span>Request Hearing</span>
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* Tabs Navigation */}
-      <div className="flex border-b border-slate-200 gap-6 text-xs font-semibold">
-        <button
-          onClick={() => setActiveTab('validation')}
-          className={`pb-3 flex items-center gap-2 border-b-2 transition-all cursor-pointer ${
-            activeTab === 'validation'
-              ? 'border-indigo-600 text-indigo-700'
-              : 'border-transparent text-slate-500 hover:text-slate-800'
-          }`}
-        >
-          <FileCheck2 className="w-4 h-4" />
-          <span>AI Validation Findings ({report?.findings?.length ?? 0})</span>
-        </button>
-        <button
-          onClick={() => setActiveTab('documents')}
-          className={`pb-3 flex items-center gap-2 border-b-2 transition-all cursor-pointer ${
-            activeTab === 'documents'
-              ? 'border-indigo-600 text-indigo-700'
-              : 'border-transparent text-slate-500 hover:text-slate-800'
-          }`}
-        >
-          <FileText className="w-4 h-4" />
-          <span>Document Vault ({app.documents?.length ?? 0})</span>
-        </button>
-        <button
-          onClick={() => setActiveTab('compliance')}
-          className={`pb-3 flex items-center gap-2 border-b-2 transition-all cursor-pointer ${
-            activeTab === 'compliance'
-              ? 'border-indigo-600 text-indigo-700'
-              : 'border-transparent text-slate-500 hover:text-slate-800'
-          }`}
-        >
-          <Sparkles className="w-4 h-4" />
-          <span>AICTE Norms Adherence</span>
-        </button>
-        <button
-          onClick={() => setActiveTab('audit')}
-          className={`pb-3 flex items-center gap-2 border-b-2 transition-all cursor-pointer ${
-            activeTab === 'audit'
-              ? 'border-indigo-600 text-indigo-700'
-              : 'border-transparent text-slate-500 hover:text-slate-800'
-          }`}
-        >
-          <Clock className="w-4 h-4" />
-          <span>Audit Log ({auditLogs.length})</span>
-        </button>
-      </div>
-
-      {/* Tab 1: Validation Report */}
-      {activeTab === 'validation' && (
-        <div className="space-y-4">
-          {report?.summary && (
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-              <div className="glass-panel p-4 rounded-xl">
-                <span className="text-[10px] uppercase font-bold text-slate-500">Critical Flags</span>
-                <p className="text-xl font-bold font-mono text-rose-600 mt-1">{report.summary.critical_flags}</p>
-              </div>
-              <div className="glass-panel p-4 rounded-xl">
-                <span className="text-[10px] uppercase font-bold text-slate-500">Warnings</span>
-                <p className="text-xl font-bold font-mono text-amber-600 mt-1">{report.summary.warning_flags}</p>
-              </div>
-              <div className="glass-panel p-4 rounded-xl">
-                <span className="text-[10px] uppercase font-bold text-slate-500">Checks Passed</span>
-                <p className="text-xl font-bold font-mono text-emerald-600 mt-1">{report.summary.clean_checks}</p>
-              </div>
-              <div className="glass-panel p-4 rounded-xl">
-                <span className="text-[10px] uppercase font-bold text-slate-500">Recommendation</span>
-                <p className="text-xs font-bold text-slate-800 mt-1 truncate">{report.summary.status_recommendation}</p>
-              </div>
-            </div>
-          )}
-
-          <div className="space-y-3">
-            {!report || report.findings.length === 0 ? (
-              <div className="glass-panel p-8 rounded-2xl text-center text-slate-500">
-                <CheckCircle2 className="w-10 h-10 text-emerald-500 mx-auto mb-2" />
-                <p className="font-bold text-slate-900">No active deficiencies detected</p>
-                <p className="text-xs text-slate-500 mt-1">
-                  Run the AI Scrutiny Suite to evaluate submitted documents.
-                </p>
-              </div>
-            ) : (
-              report.findings.map((item) => (
-                <div
-                  key={item.id}
-                  className={`p-4 rounded-2xl border transition-all ${
-                    item.severity === 'critical'
-                      ? 'bg-rose-50/70 border-rose-200'
-                      : item.severity === 'warning'
-                      ? 'bg-amber-50/70 border-amber-200'
-                      : 'bg-indigo-50/70 border-indigo-200'
-                  }`}
-                >
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="space-y-1">
-                      <div className="flex items-center gap-2">
-                        <span
-                          className={`text-[10px] font-mono uppercase font-bold px-2 py-0.5 rounded ${
-                            item.severity === 'critical'
-                              ? 'bg-rose-100 text-rose-800 border border-rose-200'
-                              : item.severity === 'warning'
-                              ? 'bg-amber-100 text-amber-800 border border-amber-200'
-                              : 'bg-indigo-100 text-indigo-800 border border-indigo-200'
-                          }`}
-                        >
-                          {item.severity} • {item.check_type}
-                        </span>
-                        <span className="text-xs text-slate-500 font-mono font-medium">
-                          Confidence: {(item.confidence * 100).toFixed(0)}%
-                        </span>
-                      </div>
-                      <h3 className="text-sm font-bold text-slate-900">{item.finding}</h3>
-                      {item.evidence && (
-                        <p className="text-xs text-slate-700 bg-white/80 p-2.5 rounded-lg border border-slate-200 font-mono">
-                          {item.evidence}
-                        </p>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              ))
+            <p className="text-xs text-slate-700">{app.ai_summary || 'Not screened yet.'}</p>
+            {counts && (
+              <p className="text-[11px] text-slate-500">{counts.critical_flags} critical · {counts.warning_flags} warnings · {counts.info_flags} info · screened {fmtDate(app.ai_reviewed_at)}</p>
+            )}
+            {counts && counts.risk_contributions.length > 0 && (
+              <button onClick={() => setShowWhy(!showWhy)} className="text-[11px] font-semibold text-indigo-700 cursor-pointer">{showWhy ? 'Hide' : 'Why this score?'}</button>
+            )}
+            {showWhy && counts && (
+              <ul className="text-[11px] text-slate-600 space-y-0.5 max-h-40 overflow-y-auto">
+                {counts.risk_contributions.map((c, i) => <li key={i}>+{c.points} · {c.finding}</li>)}
+              </ul>
             )}
           </div>
         </div>
-      )}
 
-      {/* Tab 2: Document Vault */}
-      {activeTab === 'documents' && (
-        <div className="space-y-4">
-          <div className="flex items-center justify-between">
-            <p className="text-xs text-slate-500 font-medium">
-              Uploaded certificates, deed scans, and financial statements with OCR extraction results
-            </p>
-            <button
-              onClick={() => setShowUploadModal(true)}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-xs font-semibold text-white transition-all shadow-xs cursor-pointer"
-            >
-              <Upload className="w-3.5 h-3.5" />
-              <span>Upload Document</span>
-            </button>
+        <div className="mt-5 pt-4 border-t border-slate-100 flex flex-wrap items-center justify-between gap-3">
+          <AdvisoryNote />
+          <div className="flex flex-wrap gap-2">
+            {isOfficial && !decided && app.status !== 'draft' && (
+              <>
+                <Button onClick={() => run('screen', () => validationApi.trigger(app.id))} busy={busy === 'screen'}><Play className="w-3.5 h-3.5" />Re-run screening</Button>
+                <Button variant="danger" onClick={() => setNoticing(true)}><FileWarning className="w-3.5 h-3.5" />Issue deficiency notice</Button>
+                <Button variant="primary" onClick={() => setDeciding(true)}><Gavel className="w-3.5 h-3.5" />Record decision</Button>
+              </>
+            )}
+            {editable && (
+              <>
+                <Button onClick={() => run('check', () => validationApi.trigger(app.id))} busy={busy === 'check'}><Play className="w-3.5 h-3.5" />Run self-check</Button>
+                <Button variant="primary" onClick={() => run('submit', () => applicationsApi.submit(app.id))} busy={busy === 'submit'}>
+                  <Send className="w-3.5 h-3.5" />{app.status === 'draft' ? 'Submit to AICTE' : 'Resubmit after rectification'}
+                </Button>
+              </>
+            )}
           </div>
+        </div>
+        {error && <p className="text-xs text-rose-600 mt-2" role="alert">{error}</p>}
+      </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {app.documents?.map((doc) => {
-              const ext = doc.extracted_data || {};
-              const forgeryScore = ext.forgery_score ?? 0;
-              const hasHeatmap = !!ext.forgery_heatmap_preview;
+      <div className="flex border-b border-slate-200 gap-5 text-xs font-semibold overflow-x-auto" role="tablist">
+        {tabs.filter((t) => t.show).map((t) => (
+          <button key={t.key} role="tab" aria-selected={tab === t.key} onClick={() => setTab(t.key)} className={cx('pb-3 flex items-center gap-1.5 border-b-2 whitespace-nowrap cursor-pointer', tab === t.key ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-slate-500 hover:text-slate-800')}>
+            <t.icon className="w-4 h-4" />{t.label}
+          </button>
+        ))}
+      </div>
 
+      {tab === 'upload' && <UploadSlots app={app} editable={editable} onChanged={load} />}
+
+      {tab === 'findings' && (
+        <div className="space-y-3">
+          {findings.length === 0 ? (
+            <Empty title={app.ai_reviewed_at ? 'No open findings' : 'Not screened yet'} hint={app.ai_reviewed_at ? 'All configured checks passed.' : 'Run the self-check after uploading documents.'} />
+          ) : (
+            (['critical', 'warning', 'info'] as const).map((sev) => {
+              const group = findings.filter((f) => f.severity === sev);
+              if (!group.length) return null;
               return (
-                <div key={doc.id} className="glass-panel p-5 rounded-2xl border border-slate-200 flex flex-col justify-between shadow-xs">
-                  <div>
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-slate-100 text-indigo-700 border border-slate-200 font-bold">
-                          {doc.doc_type.replace('_', ' ')}
-                        </span>
-                        <h3 className="text-sm font-bold text-slate-900 mt-1.5 truncate max-w-xs">
-                          {doc.original_filename}
-                        </h3>
-                      </div>
-                      <span
-                        className={`text-xs px-2.5 py-0.5 rounded-full font-bold uppercase ${
-                          doc.status === 'flagged'
-                            ? 'bg-rose-50 text-rose-700 border border-rose-200'
-                            : 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                        }`}
-                      >
-                        {doc.status}
-                      </span>
-                    </div>
-
-                    {/* Extracted Key-Values Preview */}
-                    <div className="mt-4 p-3 rounded-xl bg-slate-50 border border-slate-200 space-y-1.5 text-xs">
-                      {ext.certificate_number && (
-                        <div className="flex justify-between">
-                          <span className="text-slate-500 font-medium">Certificate No:</span>
-                          <span className="font-mono text-slate-800 font-semibold">{ext.certificate_number}</span>
-                        </div>
-                      )}
-                      {ext.valid_until && (
-                        <div className="flex justify-between">
-                          <span className="text-slate-500 font-medium">Validity:</span>
-                          <span className="font-mono text-emerald-700 font-semibold">{ext.valid_until}</span>
-                        </div>
-                      )}
-                      {ext.udin && (
-                        <div className="flex justify-between">
-                          <span className="text-slate-500 font-medium">ICAI UDIN:</span>
-                          <span className="font-mono text-indigo-700 font-semibold">{ext.udin}</span>
-                        </div>
-                      )}
-                      {ext.land_area && (
-                        <div className="flex justify-between">
-                          <span className="text-slate-500 font-medium">Land Area:</span>
-                          <span className="font-mono text-slate-800 font-semibold">{ext.land_area}</span>
-                        </div>
-                      )}
-                      <div className="flex justify-between pt-1 border-t border-slate-200 text-[11px]">
-                        <span className="text-slate-500 font-medium">Forgery Risk:</span>
-                        <span className={`font-mono font-bold ${forgeryScore > 30 ? 'text-rose-600' : 'text-emerald-600'}`}>
-                          {forgeryScore}%
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Actions Bar */}
-                  <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between gap-2">
-                    <button
-                      onClick={() => handleTriggerVerification(doc.id)}
-                      className="text-xs text-indigo-600 hover:text-indigo-700 font-bold cursor-pointer"
-                    >
-                      Verify with Authority &rarr;
-                    </button>
-
-                    {hasHeatmap && (
-                      <button
-                        onClick={() => setSelectedHeatmap(ext.forgery_heatmap_preview)}
-                        className="flex items-center gap-1 text-xs text-rose-600 hover:text-rose-700 font-bold cursor-pointer"
-                      >
-                        <Eye className="w-3.5 h-3.5" />
-                        <span>View Tamper Heatmap</span>
-                      </button>
-                    )}
-                  </div>
+                <div key={sev} className="space-y-2">
+                  <h3 className="text-[11px] uppercase font-bold tracking-wider text-slate-500">{sev} ({group.length})</h3>
+                  {group.map((f) => <FindingRow key={f.id} f={f} onOpenDoc={openDoc} />)}
                 </div>
               );
-            })}
-          </div>
+            })
+          )}
         </div>
       )}
 
-      {/* Tab 3: Compliance */}
-      {activeTab === 'compliance' && compliance && (
-        <div className="space-y-4">
-          <div className="glass-panel p-5 rounded-2xl flex items-center justify-between border border-slate-200">
-            <div>
-              <h2 className="text-sm font-bold text-slate-900">AICTE Handbook Norms Adherence Score</h2>
-              <p className="text-xs text-slate-500 mt-0.5">
-                Evaluated against statutory fire, land, faculty cadre, and financial requirements
-              </p>
-            </div>
-            <div className="text-right">
-              <span className="text-2xl font-bold font-mono text-indigo-600">{compliance.compliance_score}%</span>
-              <p className="text-[11px] text-slate-500 font-medium">
-                {compliance.compliant_count} / {compliance.total_rules_evaluated} Rules Satisfied
-              </p>
-            </div>
-          </div>
+      {tab === 'documents' && <DocumentReview documents={app.documents || []} initialId={focusDoc} isOfficial={isOfficial} />}
 
-          <div className="space-y-3">
-            {compliance.results.map((r) => (
-              <div
-                key={r.rule_code}
-                className="p-4 rounded-xl glass-card flex items-start justify-between gap-4 text-xs"
-              >
-                <div className="space-y-1">
-                  <div className="flex items-center gap-2">
-                    <span className="font-mono text-slate-500 font-semibold">{r.rule_code}</span>
-                    <span className="font-bold text-slate-900">{r.title}</span>
-                  </div>
-                  <p className="text-slate-600">{r.message}</p>
+      {tab === 'rules' && compliance && (
+        <Card title={`Checklist evaluation — ${compliance.compliant_count}/${compliance.total_rules_evaluated} rules met`}>
+          <table className="w-full text-xs">
+            <thead><tr className="text-left text-slate-500 border-b border-slate-100"><th className="py-2">Rule</th><th>Result</th><th>Expected</th><th>Found</th><th>Detail</th></tr></thead>
+            <tbody>
+              {compliance.results.map((r) => (
+                <tr key={r.rule_code} className="border-b border-slate-50 align-top">
+                  <td className="py-2 pr-2"><p className="font-semibold text-slate-800">{r.title}</p><p className="text-[10px] font-mono text-slate-400">{r.rule_code} v{r.rule_version} · {r.category}</p></td>
+                  <td className="pr-2"><Pill tone={r.status === 'compliant' ? 'emerald' : r.status === 'non_compliant' ? 'rose' : r.status === 'warning' ? 'amber' : 'slate'}>{r.status.replace('_', ' ')}</Pill></td>
+                  <td className="pr-2 font-mono">{r.expected ?? '—'}</td>
+                  <td className="pr-2 font-mono">{r.actual ?? '—'}</td>
+                  <td className="text-slate-600">{r.message}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Card>
+      )}
+
+      {tab === 'notices' && (notices.length === 0 ? <Empty title="No deficiency notices" /> : (
+        <div className="space-y-3">
+          {notices.map((n) => (
+            <NoticeCard key={n.id} n={n} onAck={!isOfficial ? async (x) => { await notificationsApi.acknowledge(x.id); load(); } : undefined} />
+          ))}
+        </div>
+      ))}
+
+      {tab === 'audit' && (
+        <Card title="Audit trail (hash-chained, append-only)">
+          <ul className="divide-y divide-slate-100">
+            {audit.map((e) => (
+              <li key={e.id} className="py-2 text-xs flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p><span className="font-semibold text-slate-800">{e.action.replace(/_/g, ' ')}</span> <span className="text-slate-500">· {e.actor}{e.actor_role ? ` (${e.actor_role})` : ''}</span></p>
+                  <p className="text-[11px] text-slate-500 truncate">{summarize(e.details)}</p>
                 </div>
-                <span
-                  className={`px-2.5 py-1 rounded-full font-bold uppercase text-[10px] shrink-0 ${
-                    r.status === 'compliant'
-                      ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                      : 'bg-rose-50 text-rose-700 border border-rose-200'
-                  }`}
-                >
-                  {r.status.replace('_', ' ')}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Tab 4: Audit Log */}
-      {activeTab === 'audit' && (
-        <div className="glass-panel rounded-2xl p-6 border border-slate-200">
-          <h2 className="text-sm font-bold text-slate-900 mb-4">Immutable Application Audit Trail</h2>
-          <div className="space-y-3">
-            {auditLogs.map((log) => (
-              <div key={log.id} className="p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs flex justify-between items-center">
-                <div>
-                  <span className="font-semibold text-indigo-600">{log.action}</span>
-                  <p className="text-slate-600 text-[11px] mt-0.5">{JSON.stringify(log.details)}</p>
+                <div className="text-right shrink-0">
+                  <p className="text-[11px] text-slate-400">{fmtDate(e.created_at)}</p>
+                  {e.entry_hash && <p className="text-[10px] font-mono text-slate-400 flex items-center gap-0.5 justify-end" title={e.entry_hash}><Hash className="w-3 h-3" />{e.entry_hash.slice(0, 10)}</p>}
                 </div>
-                <span className="font-mono text-slate-400 text-[10px] font-medium">
-                  {new Date(log.created_at).toLocaleString()}
-                </span>
-              </div>
+              </li>
             ))}
-          </div>
-        </div>
+          </ul>
+        </Card>
       )}
 
-      {/* Upload Document Modal */}
-      {showUploadModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-xs">
-          <div className="bg-white w-full max-w-md rounded-2xl p-6 border border-slate-200 shadow-2xl">
-            <h2 className="text-base font-bold text-slate-900 mb-1">Upload Document to Vault</h2>
-            <p className="text-xs text-slate-500 mb-4">
-              File will be processed through PaddleOCR and Error Level Forgery Analysis
-            </p>
-
-            <form onSubmit={handleDocumentUpload} className="space-y-4">
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">Document Category</label>
-                <select
-                  value={uploadDocType}
-                  onChange={(e) => setUploadDocType(e.target.value as DocumentType)}
-                  className="w-full bg-slate-50 border border-slate-200 text-xs text-slate-900 px-3 py-2 rounded-xl focus:outline-none focus:bg-white focus:border-indigo-600"
-                >
-                  <option value="fire_safety">Fire Safety Certificate</option>
-                  <option value="audit_report">Audited Balance Sheet</option>
-                  <option value="land_document">Land Title Deed</option>
-                  <option value="faculty_list">Approved Faculty List</option>
-                  <option value="affidavit">Statutory Affidavit</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">Select PDF or Image</label>
-                <input
-                  type="file"
-                  required
-                  accept=".pdf,.png,.jpg,.jpeg"
-                  onChange={(e) => setUploadFile(e.target.files?.[0] || null)}
-                  className="w-full text-xs text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100 cursor-pointer"
-                />
-              </div>
-
-              <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-100">
-                <button
-                  type="button"
-                  onClick={() => setShowUploadModal(false)}
-                  className="px-4 py-2 text-xs font-semibold text-slate-500 hover:text-slate-800 cursor-pointer"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={uploading}
-                  className="px-5 py-2 rounded-xl text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 shadow-sm shadow-indigo-600/25 cursor-pointer disabled:opacity-50"
-                >
-                  {uploading ? 'Analyzing...' : 'Upload & Analyze'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* Forgery Heatmap Modal */}
-      {selectedHeatmap && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
-          <div className="bg-white w-full max-w-2xl rounded-2xl p-6 border border-slate-200 shadow-2xl">
-            <div className="flex items-center justify-between mb-4">
-              <div>
-                <h2 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                  <ShieldAlert className="w-5 h-5 text-rose-600" />
-                  Error Level Analysis (ELA) Tamper Heatmap
-                </h2>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  High-intensity hot spots indicate digitally spliced text, altered dates, or pasted stamps
-                </p>
-              </div>
-              <button
-                onClick={() => setSelectedHeatmap(null)}
-                className="p-1.5 rounded-lg bg-slate-100 text-slate-500 hover:text-slate-800 hover:bg-slate-200 cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="rounded-xl overflow-hidden border border-slate-200 bg-slate-950 flex items-center justify-center max-h-[500px]">
-              <img src={selectedHeatmap} alt="Forgery Heatmap" className="object-contain max-h-[480px] w-full" />
-            </div>
-
-            <div className="mt-4 flex justify-end">
-              <button
-                onClick={() => setSelectedHeatmap(null)}
-                className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-xs font-semibold text-slate-700 cursor-pointer"
-              >
-                Close Forensics Viewer
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {deciding && <DecisionModal app={app} onClose={() => setDeciding(false)} onDone={() => { setDeciding(false); load(); }} />}
+      {noticing && <NoticeModal app={app} findings={findings} onClose={() => setNoticing(false)} onDone={() => { setNoticing(false); setTab('notices'); load(); }} />}
     </div>
+  );
+};
+
+const summarize = (d: Record<string, any>) =>
+  Object.entries(d || {})
+    .filter(([, v]) => typeof v !== 'object')
+    .slice(0, 5)
+    .map(([k, v]) => `${k}: ${v}`)
+    .join(' · ');
+
+const DecisionModal: React.FC<{ app: Application; onClose: () => void; onDone: () => void }> = ({ app, onClose, onDone }) => {
+  const [status, setStatus] = useState('approved');
+  const [notes, setNotes] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const aiAdverse = app.ai_recommendation === 'deficiency_suspected' || app.ai_recommendation === 'physical_inspection_suggested';
+  const override = (status === 'approved' && aiAdverse) || ((status === 'rejected') && app.ai_recommendation === 'forward_for_approval');
+  const needsReason = status === 'rejected' || override;
+  const submit = async () => {
+    setBusy(true);
+    setError('');
+    try {
+      await applicationsApi.decide(app.id, status, notes || undefined);
+      onDone();
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Modal title="Record official decision" onClose={onClose}>
+      <div className="space-y-3">
+        <p className="text-xs text-slate-600">The AI recommendation is <span className="font-semibold">{AI_LABELS[app.ai_recommendation || 'pending'].label}</span>. You decide; your decision and reasons are recorded in the audit ledger.</p>
+        <div>
+          <label className="label" htmlFor="dec">Decision</label>
+          <select id="dec" className="input" value={status} onChange={(e) => setStatus(e.target.value)}>
+            <option value="approved">Approve</option>
+            <option value="verified">Mark verified (forward to approving authority)</option>
+            <option value="under_review">Keep under review / request hearing</option>
+            <option value="rejected">Reject</option>
+          </select>
+        </div>
+        {override && <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-2">This differs from the AI recommendation. Record why (e.g. inspection outcome, documents verified offline).</p>}
+        <div>
+          <label className="label" htmlFor="notes">Reasons {needsReason && <span className="text-rose-600">(required)</span>}</label>
+          <textarea id="notes" rows={4} className="input" value={notes} onChange={(e) => setNotes(e.target.value)} />
+        </div>
+        {error && <p className="text-xs text-rose-600" role="alert">{error}</p>}
+        <div className="flex justify-end gap-2">
+          <Button onClick={onClose}>Cancel</Button>
+          <Button variant="primary" busy={busy} disabled={needsReason && notes.trim().length < 10} onClick={submit}>Record decision</Button>
+        </div>
+      </div>
+    </Modal>
+  );
+};
+
+const NoticeModal: React.FC<{ app: Application; findings: ValidationResult[]; onClose: () => void; onDone: () => void }> = ({ app, findings, onClose, onDone }) => {
+  const candidates = findings.filter((f) => f.severity !== 'info');
+  const [selected, setSelected] = useState<Set<string>>(new Set(candidates.map((f) => f.id)));
+  const [notes, setNotes] = useState('Please rectify the items listed below and resubmit.');
+  const [days, setDays] = useState(7);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const toggle = (id: string) => setSelected((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const submit = async () => {
+    setBusy(true);
+    try {
+      await applicationsApi.deficiencyNotice(app.id, notes, days, [...selected]);
+      onDone();
+    } catch (e) {
+      setError(errorMessage(e));
+      setBusy(false);
+    }
+  };
+  return (
+    <Modal title="Issue deficiency notice" onClose={onClose} wide>
+      <div className="space-y-3">
+        <p className="text-xs text-slate-600">Select the items to send. Each carries its evidence and a plain-language fix. The institution replaces only the affected documents.</p>
+        <div className="space-y-2 max-h-96 overflow-y-auto">
+          {candidates.map((f) => <FindingRow key={f.id} f={f} selectable selected={selected.has(f.id)} onToggle={() => toggle(f.id)} />)}
+        </div>
+        <div className="grid grid-cols-4 gap-3">
+          <div className="col-span-3"><label className="label" htmlFor="nnotes">Note to institution</label><textarea id="nnotes" rows={2} className="input" value={notes} onChange={(e) => setNotes(e.target.value)} /></div>
+          <div><label className="label" htmlFor="days">Days to rectify</label><input id="days" type="number" min={1} max={60} className="input" value={days} onChange={(e) => setDays(Number(e.target.value))} /></div>
+        </div>
+        {error && <p className="text-xs text-rose-600" role="alert">{error}</p>}
+        <div className="flex justify-end gap-2">
+          <Button onClick={onClose}>Cancel</Button>
+          <Button variant="danger" busy={busy} disabled={selected.size === 0 || notes.trim().length < 5} onClick={submit}>Send notice ({selected.size} items)</Button>
+        </div>
+      </div>
+    </Modal>
   );
 };

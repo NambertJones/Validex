@@ -1,3 +1,18 @@
+# Development stack. Only the web UI (3000), API docs (8000) and Flower (5555) are published;
+# Postgres, Redis, MinIO and the simulated authorities stay on the internal network.
+x-backend-env: &backend-env
+  ENVIRONMENT: development
+  DATABASE_URL: postgresql://aicte:aicte_secret@postgres:5432/aicte_validation
+  REDIS_URL: redis://redis:6379/0
+  USE_CELERY: "true"
+  MINIO_ENDPOINT: minio:9000
+  MINIO_ACCESS_KEY: minio_admin
+  MINIO_SECRET_KEY: minio_secret
+  MINIO_BUCKET: aicte-documents
+  AUTHORITY_API_URL: http://mock-authority:8100
+  SECRET_KEY: ${SECRET_KEY:-dev-only-change-me-0f3a9c}
+  CORS_ORIGINS: http://localhost:3000
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -5,25 +20,18 @@ services:
       POSTGRES_USER: aicte
       POSTGRES_PASSWORD: aicte_secret
       POSTGRES_DB: aicte_validation
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
+    volumes: [postgres_data:/var/lib/postgresql/data]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U aicte -d aicte_validation"]
       interval: 5s
-      timeout: 5s
-      retries: 5
+      retries: 10
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
-      timeout: 5s
-      retries: 5
+      retries: 10
 
   minio:
     image: minio/minio:latest
@@ -31,94 +39,53 @@ services:
     environment:
       MINIO_ROOT_USER: minio_admin
       MINIO_ROOT_PASSWORD: minio_secret
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    volumes:
-      - minio_data:/data
-    healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
+    volumes: [minio_data:/data]
+
+  mock-authority:
+    build: ./backend
+    command: uvicorn app.mock_authority.main:app --host 0.0.0.0 --port 8100
 
   backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
+    build: ./backend
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-    ports:
-      - "8000:8000"
-    volumes:
-      - ./backend:/app
+    ports: ["8000:8000"]
+    volumes: [./backend:/app, models:/app/ml_models]
+    environment: *backend-env
     depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      minio:
-        condition: service_started
-    environment:
-      DATABASE_URL: postgresql://aicte:aicte_secret@postgres:5432/aicte_validation
-      REDIS_URL: redis://redis:6379/0
-      MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: minio_admin
-      MINIO_SECRET_KEY: minio_secret
-      MINIO_BUCKET: aicte-documents
-      MINIO_SECURE: "false"
-      SECRET_KEY: super-secret-jwt-key-change-in-production-8f3a2b1c
-      ALGORITHM: HS256
-      ACCESS_TOKEN_EXPIRE_MINUTES: "60"
-      CORS_ORIGINS: "http://localhost:3000,http://localhost:5173"
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      minio: {condition: service_started}
+      mock-authority: {condition: service_started}
 
-  celery_worker:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    command: celery -A app.worker.celery worker --loglevel=info --concurrency=4
-    volumes:
-      - ./backend:/app
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      minio:
-        condition: service_started
-    environment:
-      DATABASE_URL: postgresql://aicte:aicte_secret@postgres:5432/aicte_validation
-      REDIS_URL: redis://redis:6379/0
-      MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: minio_admin
-      MINIO_SECRET_KEY: minio_secret
-      MINIO_BUCKET: aicte-documents
-      MINIO_SECURE: "false"
-      SECRET_KEY: super-secret-jwt-key-change-in-production-8f3a2b1c
+  worker:
+    build: ./backend
+    command: celery -A app.worker.celery worker -Q heavy,light,default --loglevel=info --concurrency=2
+    volumes: [./backend:/app, models:/app/ml_models]
+    environment: *backend-env
+    depends_on: [backend]
 
-  celery_flower:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
+  beat:
+    build: ./backend
+    command: celery -A app.worker.celery beat --loglevel=info
+    environment: *backend-env
+    depends_on: [redis]
+
+  flower:
+    build: ./backend
     command: celery -A app.worker.celery flower --port=5555
-    ports:
-      - "5555:5555"
-    depends_on:
-      - celery_worker
-    environment:
-      REDIS_URL: redis://redis:6379/0
+    ports: ["5555:5555"]
+    environment: *backend-env
+    depends_on: [worker]
 
   frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-    ports:
-      - "3000:3000"
-    volumes:
-      - ./frontend/src:/app/src
-      - ./frontend/public:/app/public
-    depends_on:
-      - backend
+    build: ./frontend
+    ports: ["3000:3000"]
+    environment:
+      VALIDEX_API: http://backend:8000
+    volumes: [./frontend/src:/app/src, ./frontend/public:/app/public]
+    depends_on: [backend]
 
 volumes:
   postgres_data:
   minio_data:
+  models:

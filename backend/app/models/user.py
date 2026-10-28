@@ -33,5 +33,10 @@ class User(Base):
         onupdate=lambda: datetime.now(timezone.utc),
     )
 
-    applications = relationship("Application", back_populates="institution", cascade="all, delete-orphan")
+    applications = relationship(
+        "Application",
+        back_populates="institution",
+        cascade="all, delete-orphan",
+        foreign_keys="Application.institution_id",
+    )
     audit_logs = relationship("AuditLog", back_populates="user")

@@ -1,69 +1,58 @@
-"""Heuristic and keyword-based AICTE document classifier."""
+"""Keyword-based AICTE document classifier with explainable scores."""
 
 from app.models.document import DocumentType
 
 
 class DocumentClassifier:
-    """Classifies uploaded documents into official AICTE document categories."""
-
     KEYWORDS = {
         DocumentType.FIRE_SAFETY: [
-            "fire safety", "fire fighting", "fire prevention", "noc fire",
-            "fire service", "no objection certificate fire", "fire station",
-            "fire compliance", "fire extinguisher", "chief fire officer",
+            "fire safety", "fire fighting", "fire prevention", "noc fire", "fire service",
+            "no objection certificate fire", "fire station", "fire compliance", "chief fire officer", "fire noc",
         ],
         DocumentType.AUDIT_REPORT: [
-            "auditor's report", "chartered accountant", "balance sheet",
-            "profit and loss", "income and expenditure", "financial year",
-            "statutory auditor", "independent auditor", "udrn", "udin",
+            "auditor's report", "chartered accountant", "balance sheet", "profit and loss",
+            "income and expenditure", "financial year", "statutory auditor", "independent auditor", "udin",
         ],
         DocumentType.LAND_DOCUMENT: [
-            "sale deed", "gift deed", "lease deed", "land registration",
-            "khasra", "khatauni", "survey number", "patta", "revenue department",
-            "sub-registrar", "land area", "acres", "acres of land", "built up area",
+            "sale deed", "gift deed", "lease deed", "land registration", "khasra", "khatauni",
+            "survey no", "patta", "sub-registrar", "acres", "title deed",
         ],
         DocumentType.FACULTY_LIST: [
-            "faculty details", "teaching staff", "assistant professor",
-            "associate professor", "professor & head", "cadre ratio",
-            "qualification", "m.tech", "ph.d", "date of joining", "pan number",
+            "faculty details", "teaching staff", "assistant professor", "associate professor",
+            "cadre ratio", "faculty list", "date of joining", "qualification",
         ],
         DocumentType.NOC: [
-            "no objection certificate", "affiliating university", "state government noc",
-            "directorate of technical education", "dte noc", "board of technical education",
+            "affiliating university", "university noc", "affiliation", "directorate of technical education",
+            "board of technical education", "consent of affiliation", "no objection certificate",
         ],
         DocumentType.AFFIDAVIT: [
-            "affidavit", "stamp paper", "non-judicial stamp", "notary public",
-            "solemnly affirm", "deponent", "verified at", "before me",
+            "affidavit", "stamp paper", "non-judicial stamp", "notary public", "solemnly affirm",
+            "deponent", "e-stamp", "before me",
         ],
         DocumentType.BUILDING_PLAN: [
-            "building plan", "approved blueprint", "municipal corporation",
-            "gram panchayat", "floor area ratio", "carpet area", "architectural drawing",
-        ],
-        DocumentType.LAB_PHOTO: [
-            "laboratory", "computer lab", "workshop", "equipment", "machinery",
+            "building plan", "approved blueprint", "municipal corporation", "development authority",
+            "floor area ratio", "carpet area", "architectural drawing", "sanctioned plan", "classroom",
         ],
     }
 
-    def classify(self, text: str, original_filename: str = "") -> DocumentType:
-        """Classify document by matching keywords against extracted text and filename."""
-        text_lower = text.lower()
-        filename_lower = original_filename.lower()
-
-        scores: dict[DocumentType, int] = {doc_type: 0 for doc_type in self.KEYWORDS}
-
+    def scores(self, text: str, original_filename: str = "") -> dict[DocumentType, int]:
+        text_lower, filename_lower = text.lower(), original_filename.lower()
+        scores = {doc_type: 0 for doc_type in self.KEYWORDS}
         for doc_type, keywords in self.KEYWORDS.items():
             for kw in keywords:
-                # Text matches
                 if kw in text_lower:
                     scores[doc_type] += 2
-                # Filename matches
-                if kw in filename_lower or kw.replace(" ", "_") in filename_lower:
+                if kw.replace(" ", "_") in filename_lower or kw in filename_lower:
                     scores[doc_type] += 3
+        return scores
 
-        best_type, best_score = max(scores.items(), key=lambda x: x[1])
-        if best_score >= 2:
-            return best_type
-        return DocumentType.OTHER
+    def classify(self, text: str, original_filename: str = "") -> DocumentType:
+        best_type, best_score = max(self.scores(text, original_filename).items(), key=lambda x: x[1])
+        return best_type if best_score >= 2 else DocumentType.OTHER
+
+    def classify_text_only(self, text: str) -> tuple[DocumentType, int]:
+        best_type, best_score = max(self.scores(text, "").items(), key=lambda x: x[1])
+        return (best_type if best_score >= 4 else DocumentType.OTHER), best_score
 
 
 classifier = DocumentClassifier()

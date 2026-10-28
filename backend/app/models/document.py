@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime, timezone
 import enum
-from sqlalchemy import Column, String, Integer, DateTime, Enum, ForeignKey, JSON, Uuid
+from sqlalchemy import Column, String, Integer, Boolean, DateTime, Enum, ForeignKey, JSON, Uuid, true
 from sqlalchemy.orm import relationship
 
 from app.core.database import Base
@@ -27,6 +27,7 @@ class DocumentStatus(str, enum.Enum):
     VALIDATED = "validated"
     FLAGGED = "flagged"
     REJECTED = "rejected"
+    FAILED = "failed"
 
 
 class Document(Base):
@@ -39,11 +40,19 @@ class Document(Base):
     storage_path = Column(String(512), nullable=False)
     file_size = Column(Integer, default=0, nullable=False)
     mime_type = Column(String(128), default="application/pdf", nullable=False)
-    content_hash = Column(String(64), nullable=True, index=True)  # SHA-256
+    content_hash = Column(String(64), nullable=True, index=True)  # SHA-256 (exact duplicates)
+    phash = Column(String(16), nullable=True, index=True)  # 64-bit perceptual hash (near duplicates)
     status = Column(Enum(DocumentStatus), default=DocumentStatus.PENDING, nullable=False)
     extracted_data = Column(JSON, default=dict, nullable=False)
     page_count = Column(Integer, default=1, nullable=False)
+    processing_stage = Column(String(64), nullable=True)
+    processing_progress = Column(Integer, default=0, nullable=True)
+    # Versioning for rectification: a replaced document is kept but marked not current
+    is_current = Column(Boolean, default=True, server_default=true(), nullable=False)
+    superseded_by_id = Column(Uuid, nullable=True)
+    uploaded_by = Column(Uuid, ForeignKey("users.id"), nullable=True)
     uploaded_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    files_purged_at = Column(DateTime(timezone=True), nullable=True)
 
     application = relationship("Application", back_populates="documents")
     validation_results = relationship("ValidationResult", back_populates="document", cascade="all, delete-orphan")

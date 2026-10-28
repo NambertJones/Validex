@@ -1,48 +1,77 @@
-"""Pytest configuration and test database fixtures."""
+"""Test configuration: isolated SQLite file DB, local temp storage, inline processing."""
 
 import os
+import sys
+import tempfile
+
 import pytest
-from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
-os.environ["DATABASE_URL"] = "sqlite:///:memory:"
-os.environ["DEBUG"] = "False"
+_TMP = tempfile.mkdtemp(prefix="validex_test_")
+os.environ.update({
+    "DATABASE_URL": f"sqlite:///{_TMP}/test.db",
+    "INLINE_PROCESSING": "true",
+    "USE_MINIO": "false",
+    "USE_CELERY": "false",
+    "ENVIRONMENT": "test",
+    "SECRET_KEY": "test-secret-key-for-unit-tests-only-0123456789",
+})
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "scripts")))
 
-from app.core.database import Base, get_db
-from app.main import app
+from fastapi.testclient import TestClient  # noqa: E402
 
-engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
-TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+from app.core.rate_limit import login_limiter  # noqa: E402
+from app.core.storage import storage  # noqa: E402
+from app.main import app  # noqa: E402
+from app.mock_authority import service as mock_authority  # noqa: E402
+from app.services.connectors import reset_breakers  # noqa: E402
+
+storage.local_dir = os.path.join(_TMP, "vault")
+os.makedirs(storage.local_dir, exist_ok=True)
+storage.client = None
 
 
-@pytest.fixture(scope="session", autouse=True)
-def setup_db():
-    Base.metadata.create_all(bind=engine)
+@pytest.fixture(scope="session")
+def client():
+    with TestClient(app) as c:
+        yield c
+
+
+@pytest.fixture(autouse=True)
+def _reset_state():
+    login_limiter.reset()
+    mock_authority.set_outage(False)
+    reset_breakers()
     yield
-    Base.metadata.drop_all(bind=engine)
+    mock_authority.set_outage(False)
+
+
+def login(client, email: str, password: str) -> dict:
+    res = client.post("/api/auth/login-json", json={"email": email, "password": password})
+    assert res.status_code == 200, res.text
+    return {"Authorization": f"Bearer {res.json()['access_token']}"}
 
 
 @pytest.fixture
-def db_session():
-    connection = engine.connect()
-    transaction = connection.begin()
-    session = TestingSessionLocal(bind=connection)
-    yield session
-    session.close()
-    transaction.rollback()
-    connection.close()
+def admin(client):
+    return login(client, "admin@aicte-india.org", "admin123")
 
 
 @pytest.fixture
-def client(db_session):
-    def override_get_db():
-        try:
-            yield db_session
-        finally:
-            pass
+def officer(client):
+    return login(client, "scrutiny@aicte-india.org", "scrutiny123")
 
-    app.dependency_overrides[get_db] = override_get_db
-    with TestClient(app) as test_client:
-        yield test_client
-    app.dependency_overrides.clear()
+
+@pytest.fixture
+def apex(client):
+    return login(client, "principal@apex.edu.in", "apex123")
+
+
+@pytest.fixture
+def zenith(client):
+    return login(client, "principal@zenith.edu.in", "zenith123")
+
+
+@pytest.fixture(scope="session")
+def demo_sets():
+    import demo_documents
+    return demo_documents.build()

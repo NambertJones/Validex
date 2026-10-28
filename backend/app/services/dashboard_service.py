@@ -1,120 +1,111 @@
-"""Dashboard analytics and executive metrics aggregation service."""
+"""Dashboard analytics computed from live data (no placeholder numbers)."""
+
+from collections import Counter
+from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
-from sqlalchemy import func
 
-from app.models.application import Application, ApplicationStatus
-from app.models.document import Document, DocumentStatus
-from app.models.validation_result import ValidationResult, Severity
+from app.models.application import AIRecommendation, Application, ApplicationStatus
 from app.models.audit_log import AuditLog
-from app.schemas.dashboard import (
-    DashboardStatsResponse,
-    RiskDistributionItem,
-    AlertItem,
-    ActivityItem,
-)
+from app.models.document import Document, DocumentStatus
+from app.models.user import User
+from app.models.validation_result import CheckType, Severity, ValidationResult
+from app.models.verification import Verification, VerificationStatus
+from app.schemas.dashboard import ActivityItem, AlertItem, DashboardStatsResponse, MetricsResponse, RiskDistributionItem
+
+VISIBLE = Application.status != ApplicationStatus.DRAFT
 
 
 class DashboardService:
     @staticmethod
     def get_stats(db: Session) -> DashboardStatsResponse:
-        total = db.query(Application).count()
-        under_review = db.query(Application).filter(Application.status == ApplicationStatus.UNDER_REVIEW).count()
-        deficiency = db.query(Application).filter(Application.status == ApplicationStatus.DEFICIENCY_FOUND).count()
-        approved = db.query(Application).filter(
-            Application.status.in_([ApplicationStatus.VERIFIED, ApplicationStatus.APPROVED])
-        ).count()
-        high_risk = db.query(Application).filter(Application.risk_score >= 60.0).count()
-        total_docs = db.query(Document).count()
-        forgery_count = db.query(Document).filter(Document.status == DocumentStatus.FLAGGED).count()
-
+        apps = db.query(Application).filter(VISIBLE).all()
+        by_status = Counter(a.status for a in apps)
+        docs = db.query(Document).filter(Document.is_current.is_(True)).all()
+        times = [d.extracted_data.get("processing_seconds") for d in docs if (d.extracted_data or {}).get("processing_seconds")]
+        now = datetime.now(timezone.utc)
+        overdue = sum(1 for a in apps if a.status == ApplicationStatus.DEFICIENCY_FOUND and a.rectification_due
+                      and (a.rectification_due if a.rectification_due.tzinfo else a.rectification_due.replace(tzinfo=timezone.utc)) < now)
         return DashboardStatsResponse(
-            total_applications=total,
-            under_review=under_review,
-            deficiency_found=deficiency,
-            verified_approved=approved,
-            high_risk_flagged=high_risk,
-            avg_processing_time_hours=4.2,
-            total_documents_processed=total_docs,
-            forgery_detected_count=forgery_count,
+            total_applications=len(apps),
+            awaiting_review=by_status[ApplicationStatus.SUBMITTED] + by_status[ApplicationStatus.UNDER_REVIEW],
+            deficiency_found=by_status[ApplicationStatus.DEFICIENCY_FOUND],
+            approved=by_status[ApplicationStatus.APPROVED],
+            rejected=by_status[ApplicationStatus.REJECTED],
+            high_risk_flagged=sum(1 for a in apps if a.risk_score >= 60),
+            total_documents_processed=sum(1 for d in docs if d.status not in (DocumentStatus.PENDING, DocumentStatus.PROCESSING)),
+            tamper_suspected_count=sum(1 for d in docs if ((d.extracted_data or {}).get("forensics") or {}).get("is_suspected")),
+            duplicate_flags=sum(1 for d in docs if (d.extracted_data or {}).get("duplicates")),
+            pending_source_verifications=db.query(Verification).filter(
+                Verification.status.in_([VerificationStatus.PENDING, VerificationStatus.UNAVAILABLE])).count(),
+            avg_processing_seconds_per_document=round(sum(times) / len(times), 2) if times else None,
+            overdue_rectifications=overdue,
         )
 
     @staticmethod
     def get_risk_distribution(db: Session) -> list[RiskDistributionItem]:
-        low = db.query(Application).filter(Application.risk_score < 25.0).count()
-        med = db.query(Application).filter(Application.risk_score >= 25.0, Application.risk_score < 60.0).count()
-        high = db.query(Application).filter(Application.risk_score >= 60.0, Application.risk_score < 80.0).count()
-        critical = db.query(Application).filter(Application.risk_score >= 80.0).count()
-
-        # If zero records in DB yet, show realistic sample distribution
-        if (low + med + high + critical) == 0:
-            return [
-                RiskDistributionItem(category="Low Risk (<25)", count=184, color="#10B981"),
-                RiskDistributionItem(category="Medium Risk (25-59)", count=42, color="#F59E0B"),
-                RiskDistributionItem(category="High Risk (60-79)", count=15, color="#F97316"),
-                RiskDistributionItem(category="Critical Deficiencies (80+)", count=7, color="#EF4444"),
-            ]
-
-        return [
-            RiskDistributionItem(category="Low Risk (<25)", count=low, color="#10B981"),
-            RiskDistributionItem(category="Medium Risk (25-59)", count=med, color="#F59E0B"),
-            RiskDistributionItem(category="High Risk (60-79)", count=high, color="#F97316"),
-            RiskDistributionItem(category="Critical Deficiencies (80+)", count=critical, color="#EF4444"),
-        ]
+        scores = [a.risk_score for a in db.query(Application).filter(VISIBLE).all()]
+        bands = [("Low (<25)", 0, 25, "#10B981"), ("Medium (25-59)", 25, 60, "#F59E0B"),
+                 ("High (60-79)", 60, 80, "#F97316"), ("Critical (80+)", 80, 101, "#EF4444")]
+        return [RiskDistributionItem(category=name, count=sum(1 for s in scores if lo <= s < hi), color=color)
+                for name, lo, hi, color in bands]
 
     @staticmethod
     def get_alerts(db: Session, limit: int = 10) -> list[AlertItem]:
-        results = (
+        rows = (
             db.query(ValidationResult, Application)
             .join(Application, ValidationResult.application_id == Application.id)
-            .filter(ValidationResult.severity.in_([Severity.CRITICAL, Severity.WARNING]))
+            .filter(VISIBLE, ValidationResult.severity.in_([Severity.CRITICAL, Severity.WARNING]))
             .order_by(ValidationResult.created_at.desc())
-            .limit(limit)
-            .all()
+            .limit(200).all()
         )
-
-        alerts = []
-        for val, app in results:
-            alerts.append(
-                AlertItem(
-                    id=str(val.id),
-                    application_id=str(app.id),
-                    application_number=app.application_number,
-                    institution_name=app.institution_name,
-                    title=val.finding,
-                    severity=val.severity.value,
-                    message=val.evidence or "Requires scrutiny review",
-                    created_at=val.created_at,
-                )
-            )
-
-        return alerts
+        rows.sort(key=lambda r: (r[0].severity != Severity.CRITICAL, -r[0].created_at.timestamp()))
+        return [AlertItem(id=str(v.id), application_id=str(a.id), application_number=a.application_number,
+                          institution_name=a.institution_name, title=v.finding, severity=v.severity.value,
+                          check_type=v.check_type.value, message=v.evidence or "", created_at=v.created_at)
+                for v, a in rows[:limit]]
 
     @staticmethod
-    def get_recent_activity(db: Session, limit: int = 10) -> list[ActivityItem]:
-        logs = (
-            db.query(AuditLog, Application)
-            .outerjoin(Application, AuditLog.application_id == Application.id)
-            .order_by(AuditLog.created_at.desc())
-            .limit(limit)
-            .all()
-        )
-
-        activities = []
+    def get_recent_activity(db: Session, limit: int = 15) -> list[ActivityItem]:
+        logs = (db.query(AuditLog, Application).outerjoin(Application, AuditLog.application_id == Application.id)
+                .filter(AuditLog.action.notin_(["USER_LOGIN", "LOGIN_FAILED", "DOCUMENT_VIEWED"]))
+                .order_by(AuditLog.created_at.desc()).limit(limit).all())
+        users = {u.id: u for u in db.query(User).filter(User.id.in_({l.user_id for l, _ in logs if l.user_id})).all()}
+        out = []
         for log, app in logs:
-            action_readable = log.action.replace("_", " ").title()
-            activities.append(
-                ActivityItem(
-                    id=str(log.id),
-                    action=action_readable,
-                    user_name="AI Scrutiny Agent" if not log.user_id else "Official Officer",
-                    institution_name=app.institution_name if app else "System Wide",
-                    timestamp=log.created_at,
-                    details=str(log.details.get("filename") or log.details.get("status") or log.action),
-                )
-            )
+            d = log.details or {}
+            summary = d.get("filename") or d.get("to") or d.get("recommendation") or d.get("status") or d.get("rule_code") or ""
+            out.append(ActivityItem(
+                id=str(log.id), action=log.action.replace("_", " ").title(),
+                user_name=users[log.user_id].full_name if log.user_id in users else "Automated check",
+                institution_name=app.institution_name if app else "System", timestamp=log.created_at, details=str(summary)))
+        return out
 
-        return activities
+    @staticmethod
+    def get_metrics(db: Session) -> MetricsResponse:
+        """Operational metrics aligned with the problem statement's evaluation criteria."""
+        verifs = db.query(Verification).all()
+        vc = Counter(v.status.value for v in verifs)
+        completed = sum(vc[s] for s in ("verified", "mismatch", "expired"))
+        docs = db.query(Document).filter(Document.is_current.is_(True)).all()
+        levels = Counter(((d.extracted_data or {}).get("forensics") or {}).get("level", "not_run") for d in docs)
+        times = [d.extracted_data.get("processing_seconds") for d in docs if (d.extracted_data or {}).get("processing_seconds")]
+        decided = db.query(Application).filter(Application.decided_at.isnot(None)).all()
+        agree = 0
+        for a in decided:
+            ai_adverse = a.ai_recommendation in (AIRecommendation.DEFICIENCY, AIRecommendation.INSPECTION)
+            human_adverse = a.status in (ApplicationStatus.DEFICIENCY_FOUND, ApplicationStatus.REJECTED)
+            agree += int(ai_adverse == human_adverse)
+        return MetricsResponse(
+            verification={"total_checks": len(verifs), "by_status": dict(vc),
+                           "automated_completion_rate": round(completed / len(verifs), 3) if verifs else None},
+            forensics={"documents": len(docs), "by_level": dict(levels)},
+            processing={"documents_with_timing": len(times),
+                        "avg_seconds_per_document": round(sum(times) / len(times), 2) if times else None,
+                        "max_seconds": max(times) if times else None},
+            decisions={"decided": len(decided), "ai_human_agreement_rate": round(agree / len(decided), 3) if decided else None,
+                       "duplicate_findings": db.query(ValidationResult).filter(ValidationResult.check_type == CheckType.DUPLICATE).count()},
+        )
 
 
 dashboard_service = DashboardService()

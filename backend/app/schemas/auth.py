@@ -2,15 +2,26 @@
 
 from uuid import UUID
 from datetime import datetime
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 from app.models.user import UserRole
 
 
 class UserCreate(BaseModel):
-    email: str
-    password: str
-    full_name: str
-    role: UserRole = UserRole.INSTITUTION
+    """Public self-registration: always creates an institution account."""
+
+    email: str = Field(pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$", max_length=255)
+    password: str = Field(min_length=8, max_length=128)
+    full_name: str = Field(min_length=2, max_length=255)
+    institution_name: str | None = Field(default=None, max_length=255)
+
+
+class OfficialCreate(BaseModel):
+    """Admin-only creation of official accounts."""
+
+    email: str = Field(pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$", max_length=255)
+    password: str = Field(min_length=8, max_length=128)
+    full_name: str = Field(min_length=2, max_length=255)
+    role: UserRole
     institution_name: str | None = None
 
 
@@ -27,12 +38,9 @@ class Token(BaseModel):
     email: str
 
 
-class TokenPayload(BaseModel):
-    sub: str | None = None
-    role: str | None = None
-
-
 class UserResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: UUID
     email: str
     full_name: str
@@ -40,6 +48,3 @@ class UserResponse(BaseModel):
     institution_name: str | None
     is_active: bool
     created_at: datetime
-
-    class Config:
-        from_attributes = True

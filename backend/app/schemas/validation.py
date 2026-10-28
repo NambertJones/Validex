@@ -1,13 +1,15 @@
-"""Pydantic schemas for validation findings, fraud flags, and compliance checks."""
+"""Pydantic schemas for validation findings and the decision-support report."""
 
 from uuid import UUID
 from datetime import datetime
 from typing import Any
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from app.models.validation_result import CheckType, Severity
 
 
 class ValidationResultResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: UUID
     application_id: UUID
     document_id: UUID | None
@@ -15,22 +17,22 @@ class ValidationResultResponse(BaseModel):
     severity: Severity
     finding: str
     evidence: str | None
+    fix_hint: str | None = None
     details: dict[str, Any]
     confidence: float
+    rule_code: str | None = None
+    rule_version: int | None = None
     created_at: datetime
-
-    class Config:
-        from_attributes = True
 
 
 class ValidationSummary(BaseModel):
-    total_checks: int
     critical_flags: int
     warning_flags: int
     info_flags: int
-    clean_checks: int
     risk_score: float
-    status_recommendation: str
+    ai_recommendation: str | None
+    ai_summary: str | None
+    risk_contributions: list[dict[str, Any]]
 
 
 class ValidationReportResponse(BaseModel):
@@ -41,3 +43,4 @@ class ValidationReportResponse(BaseModel):
     summary: ValidationSummary
     findings: list[ValidationResultResponse]
     generated_at: datetime
+    disclaimer: str

@@ -1,109 +1,68 @@
 import React, { useEffect, useState } from 'react';
-import { Search, ShieldCheck } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { ShieldCheck, ShieldAlert, Hash } from 'lucide-react';
 import { auditApi } from '../api/client';
+import type { AuditEntry } from '../types';
+import { Button, Card, Spinner, fmtDate } from '../components/ui';
 
 export const AuditPage: React.FC = () => {
-  const [logs, setLogs] = useState<any[]>([]);
-  const [search, setSearch] = useState('');
-  const [loading, setLoading] = useState(true);
+  const [logs, setLogs] = useState<AuditEntry[] | null>(null);
+  const [action, setAction] = useState('');
+  const [chain, setChain] = useState<any>(null);
+  const [checking, setChecking] = useState(false);
 
-  useEffect(() => {
-    const fetchLogs = async () => {
-      try {
-        const data = await auditApi.getSystemLogs();
-        setLogs(data);
-      } catch (err) {
-        console.error('Error fetching audit logs:', err);
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetchLogs();
-  }, []);
+  useEffect(() => { setLogs(null); auditApi.getSystemLogs(action || undefined).then(setLogs); }, [action]);
 
-  const filteredLogs = logs.filter(
-    (l) =>
-      l.action.toLowerCase().includes(search.toLowerCase()) ||
-      JSON.stringify(l.details).toLowerCase().includes(search.toLowerCase())
-  );
+  const verify = async () => {
+    setChecking(true);
+    try { setChain(await auditApi.verifyChain()); } finally { setChecking(false); }
+  };
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+    <div className="space-y-5">
+      <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900">System Audit & Governance Trail</h1>
-          <p className="text-sm text-slate-500 mt-0.5">
-            Immutable cryptographic audit logs recording every document ingestion, fraud detection, and official decision
-          </p>
+          <h1 className="text-2xl font-bold tracking-tight text-slate-900">Audit Ledger</h1>
+          <p className="text-sm text-slate-500 mt-0.5">Every automated check, source response, rule change, document view and official action. Entries are hash-chained.</p>
         </div>
-        <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs font-semibold">
-          <ShieldCheck className="w-4 h-4 text-emerald-600" />
-          <span>Tamper-Resistant Log Active</span>
-        </div>
+        <Button variant="primary" busy={checking} onClick={verify}><ShieldCheck className="w-4 h-4" />Verify chain integrity</Button>
       </div>
 
-      <div className="glass-panel rounded-2xl p-4 flex items-center justify-between gap-4">
-        <div className="relative w-full max-w-md">
-          <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-          <input
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search audit actions, filenames, or decisions..."
-            className="w-full bg-slate-50 border border-slate-200 text-xs text-slate-800 pl-10 pr-4 py-2 rounded-xl focus:outline-none focus:border-indigo-500 focus:bg-white"
-          />
+      {chain && (
+        <div className={`p-4 rounded-xl border text-sm ${chain.valid ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-rose-50 border-rose-200 text-rose-800'}`} role="status">
+          <p className="font-semibold flex items-center gap-2">{chain.valid ? <ShieldCheck className="w-4 h-4" /> : <ShieldAlert className="w-4 h-4" />}{chain.valid ? `Chain intact: ${chain.entries_checked} entries verified` : `Integrity problems found in ${chain.problems.length} entr${chain.problems.length === 1 ? 'y' : 'ies'}`}</p>
+          {chain.head_hash && <p className="text-[11px] font-mono mt-1">head {chain.head_hash}</p>}
+          {chain.problems?.map((p: any) => <p key={p.id} className="text-xs mt-1">{p.action}: {p.problem}</p>)}
         </div>
-        <span className="text-xs font-mono text-slate-500">{filteredLogs.length} events logged</span>
-      </div>
+      )}
 
-      <div className="glass-panel rounded-2xl overflow-hidden border border-slate-200 shadow-sm">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs">
-            <thead className="bg-slate-50/80 border-b border-slate-200 text-slate-600 uppercase tracking-wider font-semibold">
-              <tr>
-                <th className="py-3.5 px-6">Timestamp</th>
-                <th className="py-3.5 px-6">Action</th>
-                <th className="py-3.5 px-6">Target Application</th>
-                <th className="py-3.5 px-6">Audit Details</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100 font-mono text-[11px]">
-              {loading ? (
-                <tr>
-                  <td colSpan={4} className="text-center py-8 text-slate-400 font-sans">
-                    Loading audit trail...
+      <Card title="Entries" actions={
+        <select className="input w-56" value={action} onChange={(e) => setAction(e.target.value)} aria-label="Filter by action">
+          <option value="">All actions</option>
+          {['APPLICATION_DECISION', 'DEFICIENCY_NOTICE_ISSUED', 'AI_PRESCREENING_COMPLETED', 'DOCUMENT_VERIFIED', 'DOCUMENT_UPLOADED', 'DOCUMENT_REPLACED', 'DOCUMENT_VIEWED', 'RULE_UPDATED', 'USER_LOGIN', 'LOGIN_FAILED'].map((a) => <option key={a}>{a}</option>)}
+        </select>
+      }>
+        {!logs ? <div className="flex justify-center p-8"><Spinner /></div> : (
+          <table className="w-full text-xs">
+            <thead><tr className="text-left text-slate-500 border-b border-slate-100"><th className="py-2">Time</th><th>Action</th><th>Actor</th><th>Details</th><th>IP</th><th>Hash</th></tr></thead>
+            <tbody>
+              {logs.map((l) => (
+                <tr key={l.id} className="border-b border-slate-50 align-top">
+                  <td className="py-1.5 pr-2 whitespace-nowrap text-slate-500">{fmtDate(l.created_at)}</td>
+                  <td className="pr-2 font-semibold text-slate-800">{l.action}</td>
+                  <td className="pr-2">{l.actor}{l.actor_role ? <span className="text-slate-400"> ({l.actor_role})</span> : ''}</td>
+                  <td className="pr-2 text-slate-600 max-w-md truncate" title={JSON.stringify(l.details)}>
+                    {l.application_id && <Link className="text-indigo-700 mr-1" to={`/applications/${l.application_id}`}>app</Link>}
+                    {Object.entries(l.details || {}).filter(([, v]) => typeof v !== 'object').slice(0, 4).map(([k, v]) => `${k}: ${v}`).join(' · ')}
                   </td>
+                  <td className="pr-2 font-mono text-slate-400">{l.ip_address || '—'}</td>
+                  <td className="font-mono text-slate-400" title={l.entry_hash || ''}>{l.entry_hash ? <span className="flex items-center gap-0.5"><Hash className="w-3 h-3" />{l.entry_hash.slice(0, 8)}</span> : '—'}</td>
                 </tr>
-              ) : filteredLogs.length === 0 ? (
-                <tr>
-                  <td colSpan={4} className="text-center py-8 text-slate-400 font-sans">
-                    No matching events recorded.
-                  </td>
-                </tr>
-              ) : (
-                filteredLogs.map((log) => (
-                  <tr key={log.id} className="hover:bg-slate-50/80 transition-colors">
-                    <td className="py-3.5 px-6 text-slate-500 whitespace-nowrap">
-                      {new Date(log.created_at).toLocaleString()}
-                    </td>
-                    <td className="py-3.5 px-6">
-                      <span className="font-semibold text-indigo-700 px-2.5 py-1 rounded-md bg-indigo-50 border border-indigo-100">
-                        {log.action}
-                      </span>
-                    </td>
-                    <td className="py-3.5 px-6 text-slate-800 font-medium">
-                      {log.application_id ? log.application_id.slice(0, 8) + '...' : 'System'}
-                    </td>
-                    <td className="py-3.5 px-6 text-slate-600 max-w-md truncate">
-                      {JSON.stringify(log.details)}
-                    </td>
-                  </tr>
-                ))
-              )}
+              ))}
             </tbody>
           </table>
-        </div>
-      </div>
+        )}
+      </Card>
     </div>
   );
 };
