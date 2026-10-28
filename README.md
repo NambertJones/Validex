@@ -53,8 +53,9 @@ Processing pipeline per document, with a live progress bar in the UI:
 cd backend
 python -m venv .venv
 .venv\Scripts\activate            # Linux/macOS: source .venv/bin/activate
-pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
-pip install -r requirements.txt
+pip install -r requirements.txt                    # light: ONNX Runtime detector + Tesseract OCR, no PyTorch
+# optional full ML (EasyOCR for scans): pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
+#                                       pip install -r requirements-ml.txt
 python ../scripts/generate_demo_data.py --reset    # synthetic documents + 3 seeded applications
 uvicorn app.main:app --port 8000
 ```
@@ -66,7 +67,9 @@ npm run dev                         # http://localhost:3000 (proxies /api to :80
 ```
 
 * API docs (for portal integration): http://localhost:8000/docs
-* The first run downloads YOLOv8n and the EasyOCR models into `backend/ml_models/`.
+* Object detection uses the bundled `backend/app/ml/weights/yolov8n.onnx` (ONNX Runtime). OCR of scans uses EasyOCR when
+  `requirements-ml.txt` is installed, otherwise Tesseract (install the `tesseract-ocr` system package). PDFs with a text
+  layer need no OCR. `GET /health` lists the engines found.
 * Uploads are processed as FastAPI background tasks locally; set `USE_CELERY=true` with Redis for workers.
 * Put 2+ **real computer-lab photos** in `sample_docs/lab_photos/` before seeding; otherwise placeholders are used and the lab rule (correctly) asks for better evidence.
 
@@ -77,7 +80,11 @@ docker compose up -d --build                       # dev: web :3000, API :8000, 
 docker compose exec backend python ../scripts/generate_demo_data.py --reset
 ```
 
-**Free hosting:** see [deploy/hf-space/SETUP.md](deploy/hf-space/SETUP.md) to run the backend on a free Hugging Face Docker Space (16 GB RAM) with Neon Postgres, keeping the frontend on Vercel.
+**Hosting:** `backend/Dockerfile` is the light image (no PyTorch). It fits Render's free plan (512 MB): measured peak
+about 460 MB with a 12-MP lab photo, documents processed one at a time (`MAX_CONCURRENT_PROCESSING`).
+`backend/Dockerfile.full` (used by docker-compose) adds EasyOCR and PyTorch and needs about 2 GB.
+[deploy/hf-space/SETUP.md](deploy/hf-space/SETUP.md) runs the full image on a Hugging Face Docker Space, which now
+requires a Hugging Face PRO subscription.
 
 `docker-compose.prod.yml` keeps every service on an internal network and exposes only Nginx on :80. It requires `SECRET_KEY`, `POSTGRES_PASSWORD` and the MinIO credentials; see `.env.production.example`. Pre-load the `models` volume (YOLO + EasyOCR weights), because the internal network has no internet access.
 

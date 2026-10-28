@@ -1,3 +1,6 @@
+# Core backend: everything except PyTorch. Fits small hosts (e.g. Render free, 512 MB RAM).
+# For EasyOCR and the ultralytics fallback also install requirements-ml.txt.
+
 # Web framework
 fastapi>=0.115
 uvicorn[standard]>=0.30
@@ -26,11 +29,9 @@ pymupdf>=1.24
 Pillow>=10.0
 opencv-python-headless>=4.9
 numpy>=1.26
-easyocr>=1.7              # raster OCR (scans/photos); PDFs with a text layer need no OCR
 rapidfuzz>=3.6            # fuzzy name matching
-
-# Computer vision (install CPU torch first: pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision)
-ultralytics>=8.2
+pytesseract>=0.3.10       # light OCR for scans (needs the tesseract-ocr system package)
+onnxruntime>=1.17         # YOLOv8n object detection without PyTorch (app/ml/weights/yolov8n.onnx)
 
 # Testing
 pytest>=8.0

@@ -46,13 +46,13 @@ services:
     networks: [internal]
 
   mock-authority:
-    build: ./backend
+    build: {context: ./backend, dockerfile: Dockerfile.full}
     restart: always
     command: uvicorn app.mock_authority.main:app --host 0.0.0.0 --port 8100
     networks: [internal]
 
   backend:
-    build: ./backend
+    build: {context: ./backend, dockerfile: Dockerfile.full}
     restart: always
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4 --proxy-headers
     environment: *backend-env
@@ -62,7 +62,7 @@ services:
       postgres: {condition: service_healthy}
 
   worker:
-    build: ./backend
+    build: {context: ./backend, dockerfile: Dockerfile.full}
     restart: always
     command: celery -A app.worker.celery worker -Q heavy,light,default --loglevel=info --concurrency=4
     environment: *backend-env
@@ -71,7 +71,7 @@ services:
     depends_on: [backend]
 
   beat:
-    build: ./backend
+    build: {context: ./backend, dockerfile: Dockerfile.full}
     restart: always
     command: celery -A app.worker.celery beat --loglevel=info
     environment: *backend-env

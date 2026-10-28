@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     USE_CELERY: bool = False
     # Process uploads synchronously inside the request (tests, seeding). Otherwise background task.
     INLINE_PROCESSING: bool = False
+    # Background documents processed at once (1 keeps memory low on 512 MB hosts)
+    MAX_CONCURRENT_PROCESSING: int = 1
 
     # MinIO
     MINIO_ENDPOINT: str = "localhost:9000"

@@ -350,12 +350,14 @@ class ForgeryDetector:
         boxes = [b for i in indicators for b in i.get("boxes", [])]
         if boxes:
             img = image.convert("RGB")
+            img.thumbnail((WORK_MAX_SIDE, WORK_MAX_SIDE))
             draw = ImageDraw.Draw(img)
             for b in boxes:
                 x0, y0 = b["x"] * img.width, b["y"] * img.height
                 draw.rectangle([x0, y0, x0 + b["w"] * img.width, y0 + b["h"] * img.height], outline=(225, 29, 72), width=4)
             evidence = _to_data_uri(img)
-        checks = ["exif", "copy_move"] + (["ela"] if is_jpeg else [])
+        big = image.size[0] * image.size[1] > ELA_MAX_PIXELS
+        checks = ["exif", "noise", "copy_move"] + (["ela_skipped_large_image" if big else "ela"] if is_jpeg else [])
         return ForgeryReport(indicators, evidence, heatmap, {"format": image.format, "size": image.size}, checks)
 
     @staticmethod
@@ -379,12 +381,20 @@ class ForgeryDetector:
         if not HAS_OPENCV:
             return [], None
         rgb = np.array(image.convert("RGB"))
+        # Geometry-based checks run on a bounded copy so 12-MP phone photos stay within small-host memory;
+        # boxes are normalised, so they map back onto the original
+        work = _downscale(rgb, WORK_MAX_SIDE)
         out, heatmap = [], None
-        if is_jpeg:
-            ela, heatmap = self._ela(image, rgb, page)
+        # ELA is a weak signal aimed at scans (~4 MP); skip it on large camera photos to bound memory
+        if is_jpeg and rgb.shape[0] * rgb.shape[1] <= ELA_MAX_PIXELS:
+            ela, heatmap = self._ela(image, rgb, work, page)
             out += ela
-        out += self._noise_consistency(rgb, page)
-        out += self._copy_move(rgb, page)
+        # Noise statistics need native pixels: decimate (no averaging) only when very large
+        noise_img = _downscale(rgb, NOISE_MAX_SIDE, interpolation=cv2.INTER_NEAREST)
+        del rgb
+        out += self._noise_consistency(noise_img, page)
+        del noise_img
+        out += self._copy_move(work, page)
         return out, heatmap
 
     @staticmethod
@@ -429,19 +439,31 @@ class ForgeryDetector:
         return out[:3]
 
     @staticmethod
-    def _ela(image: Image.Image, rgb: np.ndarray, page: int, block: int = 16):
+    def _ela(image: Image.Image, rgb: np.ndarray, work: np.ndarray, page: int, block: int = 16):
+        """ELA needs the original pixels (the JPEG grid), so it is computed in horizontal strips to
+        bound memory; only per-block means are kept."""
         buf = io.BytesIO()
         image.convert("RGB").save(buf, "JPEG", quality=90)
-        resaved = np.array(Image.open(io.BytesIO(buf.getvalue())).convert("RGB")).astype(np.float32)
-        diff = np.abs(rgb.astype(np.float32) - resaved).mean(axis=2)
-        gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
-        grad = np.hypot(cv2.Sobel(gray, cv2.CV_32F, 1, 0), cv2.Sobel(gray, cv2.CV_32F, 0, 1))
-
-        hb, wb = diff.shape[0] // block, diff.shape[1] // block
+        resaved = np.array(Image.open(io.BytesIO(buf.getvalue())).convert("RGB"))
+        H, W = rgb.shape[:2]
+        hb, wb = H // block, W // block
         if hb < 4 or wb < 4:
             return [], None
-        d = diff[: hb * block, : wb * block].reshape(hb, block, wb, block).mean(axis=(1, 3))
-        g = grad[: hb * block, : wb * block].reshape(hb, block, wb, block).mean(axis=(1, 3))
+        d = np.zeros((hb, wb), np.float32)
+        g = np.zeros((hb, wb), np.float32)
+        rows = block * 32
+        for y0 in range(0, hb * block, rows):
+            y1 = min(y0 + rows, hb * block)
+            a = rgb[y0:y1, : wb * block].astype(np.int16)
+            b = resaved[y0:y1, : wb * block].astype(np.int16)
+            diff = np.abs(a - b).mean(axis=2, dtype=np.float32)
+            gray = cv2.cvtColor(rgb[y0:y1, : wb * block], cv2.COLOR_RGB2GRAY).astype(np.float32)
+            grad = cv2.magnitude(cv2.Sobel(gray, cv2.CV_32F, 1, 0), cv2.Sobel(gray, cv2.CV_32F, 0, 1))
+            nb = (y1 - y0) // block
+            d[y0 // block: y0 // block + nb] = diff.reshape(nb, block, wb, block).mean(axis=(1, 3))
+            g[y0 // block: y0 // block + nb] = grad.reshape(nb, block, wb, block).mean(axis=(1, 3))
+        del resaved
+        diff = d  # per-block values from here on
         content = g > 8.0
         if content.sum() < 20:
             return [], None
@@ -454,14 +476,13 @@ class ForgeryDetector:
 
         # Heatmap for the reviewer regardless of verdict
         zmap = np.clip(z / 10.0, 0, 1)
-        zmap = cv2.resize((zmap * 255).astype(np.uint8), (rgb.shape[1], rgb.shape[0]), interpolation=cv2.INTER_NEAREST)
+        zmap = cv2.resize((zmap * 255).astype(np.uint8), (work.shape[1], work.shape[0]), interpolation=cv2.INTER_NEAREST)
         heat = cv2.applyColorMap(zmap, cv2.COLORMAP_JET)[:, :, ::-1]
-        blend = (rgb * 0.6 + heat * 0.4).astype(np.uint8)
+        blend = (work * 0.6 + heat * 0.4).astype(np.uint8)
         heatmap = _to_data_uri(Image.fromarray(blend))
 
         n, labels, stats, _ = cv2.connectedComponentsWithStats(suspicious, connectivity=8)
         out: list[dict[str, Any]] = []
-        H, W = rgb.shape[:2]
         for i in range(1, n):
             x, y, bw, bh, area = stats[i]
             if area < 6:
@@ -555,6 +576,19 @@ class ForgeryDetector:
                 ],
             })
         return out
+
+
+WORK_MAX_SIDE = 1600
+NOISE_MAX_SIDE = 2400
+ELA_MAX_PIXELS = 8_000_000
+
+
+def _downscale(rgb: np.ndarray, max_side: int, interpolation: int | None = None) -> np.ndarray:
+    h, w = rgb.shape[:2]
+    if max(h, w) <= max_side:
+        return rgb
+    r = max_side / max(h, w)
+    return cv2.resize(rgb, (int(w * r), int(h * r)), interpolation=cv2.INTER_AREA if interpolation is None else interpolation)
 
 
 def _to_data_uri(img: Image.Image, max_width: int = 1000) -> str:

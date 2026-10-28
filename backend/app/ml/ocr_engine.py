@@ -194,6 +194,9 @@ class OCREngine:
         return self.extract_from_image(image)
 
     def extract_from_image(self, image: Image.Image) -> OCRResult:
+        if max(image.size) > 2500:  # phone photos: OCR at a bounded size (memory and speed)
+            image = image.copy()
+            image.thumbnail((2500, 2500))
         prepared = preprocess(image)
         sx = prepared.shape[1] / image.width
         sy = prepared.shape[0] / image.height
@@ -227,7 +230,20 @@ class OCREngine:
 
         try:
             import pytesseract
-            return OCRResult(pytesseract.image_to_string(prepared), 0.8, "tesseract")
+
+            data = pytesseract.image_to_data(prepared, output_type=pytesseract.Output.DICT, config="--psm 4")
+            words, lines, confs = [], {}, []
+            for i, text in enumerate(data["text"]):
+                conf = float(data["conf"][i])
+                if not text.strip() or conf < 0:
+                    continue
+                x, y, w, h = data["left"][i], data["top"][i], data["width"][i], data["height"][i]
+                words.append({"text": text, "bbox": [x / sx, y / sy, (x + w) / sx, (y + h) / sy],
+                              "confidence": conf / 100, "page": 0, "unit": "px"})
+                lines.setdefault((data["block_num"][i], data["par_num"][i], data["line_num"][i]), []).append(text)
+                confs.append(conf / 100)
+            text = "\n".join(" ".join(ws) for ws in lines.values())
+            return OCRResult(text, round(float(np.mean(confs)), 3) if confs else 0.0, "tesseract", words)
         except Exception:
             logger.warning("No OCR engine available for raster input; returning empty text.")
             return OCRResult("", 0.0, "none")

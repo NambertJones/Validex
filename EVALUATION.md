@@ -1,14 +1,14 @@
 # Validex - evaluation on synthetic data
 
-Generated 2026-10-28T13:36:24 by `scripts/evaluate.py`. All documents are synthetic; these numbers show behaviour on this labelled set and are not a claim about real-world accuracy.
+Generated 2026-10-28T23:33:29 by `scripts/evaluate.py`. All documents are synthetic; these numbers show behaviour on this labelled set and are not a claim about real-world accuracy.
 
 ## Tampering indicators (document flagged = medium or high likelihood)
 
 | Set | Precision | Recall | F1 | False-positive rate | TP | FP | FN | TN |
 |---|---|---|---|---|---|---|---|---|
 | pdf | 1.0 | 1.0 | 1.0 | 0.0 | 20 | 0 | 0 | 20 |
-| scan | 1.0 | 0.35 | 0.519 | 0.0 | 7 | 0 | 13 | 20 |
-| all | 1.0 | 0.675 | 0.806 | 0.0 | 27 | 0 | 13 | 40 |
+| scan | 1.0 | 0.5 | 0.667 | 0.0 | 10 | 0 | 10 | 20 |
+| all | 1.0 | 0.75 | 0.857 | 0.0 | 30 | 0 | 10 | 40 |
 
 | Technique | Detected | Rate |
 |---|---|---|
@@ -16,19 +16,21 @@ Generated 2026-10-28T13:36:24 by `scripts/evaluate.py`. All documents are synthe
 | pdf:overlay | 5/5 | 1.0 |
 | pdf:redact_font | 5/5 | 1.0 |
 | pdf:whiteout | 5/5 | 1.0 |
-| scan:clone | 2/5 | 0.4 |
+| scan:clone | 5/5 | 1.0 |
 | scan:lowq_splice | 0/5 | 0.0 |
 | scan:paste | 5/5 | 1.0 |
 | scan:paste_low_noise | 0/5 | 0.0 |
 
-Average analysis time: PDF 0.018s, scan 0.868s.
+Average analysis time: PDF 0.015s, scan 0.828s.
 
 Known limits: low-quality splices and pastes onto heavily compressed, low-noise scans are hard for pixel forensics; such cases rely on QR/source verification instead.
 
 ## OCR field extraction
 
 * **pdf** (10 docs, engine `pdf-native`, 0.0s/doc): overall 1.0 — certificate_number 1.0, valid_until_iso 1.0, issue_date_iso 1.0, holder 1.0
-* **scan** (4 docs, engine `easyocr`, 13.44s/doc): overall 0.688 — certificate_number 0.0, valid_until_iso 1.0, issue_date_iso 1.0, holder 0.75
+* **scan** (4 docs, engine `easyocr`, 15.25s/doc): overall 0.688 — certificate_number 0.0, valid_until_iso 1.0, issue_date_iso 1.0, holder 0.75; identifier within 1 character edit: 1.0
+
+Scanned identifiers are not trusted for exact lookups: a verified signed QR supplies the identifier when present, and an OCR-read identifier with no registry match is routed to manual review, not reported as a mismatch.
 
 ## Duplicate images (pHash, threshold 8/64)
 
