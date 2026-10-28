@@ -1,4 +1,4 @@
-"""Celery application instance and configuration."""
+"""Celery application: separate queues for heavy AI work and light source lookups."""
 
 from celery import Celery
 
@@ -9,10 +9,8 @@ celery = Celery(
     broker=settings.REDIS_URL,
     backend=settings.REDIS_URL,
     include=[
-        "app.tasks.ocr_tasks",
-        "app.tasks.forgery_tasks",
+        "app.tasks.document_tasks",
         "app.tasks.verification_tasks",
-        "app.tasks.infrastructure_tasks",
         "app.tasks.notification_tasks",
     ],
 )
@@ -27,14 +25,17 @@ celery.conf.update(
     task_acks_late=True,
     worker_prefetch_multiplier=1,
     result_expires=3600,
-    # Task routing
     task_routes={
-        "app.tasks.ocr_tasks.*": {"queue": "ocr"},
-        "app.tasks.forgery_tasks.*": {"queue": "forgery"},
-        "app.tasks.verification_tasks.*": {"queue": "verification"},
-        "app.tasks.infrastructure_tasks.*": {"queue": "cv"},
-        "app.tasks.notification_tasks.*": {"queue": "notifications"},
+        "app.tasks.document_tasks.*": {"queue": "heavy"},          # OCR, forensics, YOLO
+        "app.tasks.verification_tasks.*": {"queue": "light"},      # issuing-authority lookups
+        "app.tasks.notification_tasks.*": {"queue": "light"},
     },
-    # Default queue for unrouted tasks
     task_default_queue="default",
+    beat_schedule={
+        # Off-peak sweep re-trying sources that were unavailable or pending
+        "retry-unavailable-verifications": {
+            "task": "app.tasks.verification_tasks.retry_due_verifications",
+            "schedule": 900.0,
+        },
+    },
 )

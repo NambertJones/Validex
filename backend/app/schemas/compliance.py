@@ -3,16 +3,20 @@
 from uuid import UUID
 from datetime import datetime
 from typing import Any
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 from app.models.compliance_rule import RuleCategory
+from app.models.validation_result import Severity
 
 
 class ComplianceRuleBase(BaseModel):
-    rule_code: str
+    rule_code: str = Field(min_length=3, max_length=64)
     title: str
     category: RuleCategory
     description: str
     conditions: dict[str, Any]
+    applies_to: list[str] | None = []
+    severity: Severity | None = Severity.CRITICAL
+    handbook_reference: str | None = None
     is_active: bool = True
 
 
@@ -25,16 +29,20 @@ class ComplianceRuleUpdate(BaseModel):
     category: RuleCategory | None = None
     description: str | None = None
     conditions: dict[str, Any] | None = None
+    applies_to: list[str] | None = None
+    severity: Severity | None = None
+    handbook_reference: str | None = None
     is_active: bool | None = None
+    change_reason: str = Field(min_length=3, description="Why the rule changed (recorded in the audit ledger)")
 
 
 class ComplianceRuleResponse(ComplianceRuleBase):
+    model_config = ConfigDict(from_attributes=True)
+
     id: UUID
+    version: int
     created_at: datetime
     updated_at: datetime
-
-    class Config:
-        from_attributes = True
 
 
 class ComplianceCheckItem(BaseModel):
@@ -44,6 +52,10 @@ class ComplianceCheckItem(BaseModel):
     status: str  # "compliant" | "non_compliant" | "warning" | "not_applicable"
     message: str
     evidence: str | None = None
+    rule_version: int | None = None
+    expected: str | None = None
+    actual: str | None = None
+    fix_hint: str | None = None
 
 
 class ComplianceEvaluationResponse(BaseModel):

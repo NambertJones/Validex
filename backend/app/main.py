@@ -1,122 +1,103 @@
-"""FastAPI application entrypoint for AICTE Validation Platform."""
+"""FastAPI application entrypoint for the AICTE validation platform (Validex)."""
 
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api import api_router
+from app.core import request_context
 from app.core.config import settings
-from app.core.database import Base, engine, SessionLocal
-from app.core.security import hash_password
+from app.core.database import SessionLocal, sync_schema
+from app.core.security import hash_password, verify_password
+from app.mock_authority.service import router as mock_authority_router
 from app.models.user import User, UserRole
 from app.services.compliance_service import compliance_service
-from app.api import api_router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Demo accounts (synthetic). Seeded only outside production.
+DEMO_USERS = [
+    ("admin@aicte-india.org", "admin123", "AICTE Approval Bureau (Admin)", UserRole.ADMIN, "AICTE Headquarters, New Delhi"),
+    ("scrutiny@aicte-india.org", "scrutiny123", "Regional Scrutiny Officer", UserRole.SCRUTINY, "AICTE Regional Office"),
+    ("expert@aicte-india.org", "expert123", "Expert Visit Committee Member", UserRole.EXPERT, "AICTE Expert Panel"),
+    ("principal@apex.edu.in", "apex123", "Dr. S. K. Ramanathan (Principal)", UserRole.INSTITUTION, "Apex Institute of Technology & Engineering"),
+    ("principal@zenith.edu.in", "zenith123", "Dr. R. Malhotra (Director)", UserRole.INSTITUTION, "Zenith College of Engineering & Research"),
+    ("principal@crescent.edu.in", "crescent123", "Dr. A. Fernandes (Principal)", UserRole.INSTITUTION, "Crescent Institute of Technology"),
+]
+
 
 def init_db():
-    """Create all tables and seed default administrator and compliance rules."""
+    sync_schema()
+    db = SessionLocal()
     try:
-        Base.metadata.create_all(bind=engine)
-        logger.info("Database tables verified / created.")
-
-        db = SessionLocal()
-        try:
-            # Seed default admin user if absent
-            admin = db.query(User).filter(User.email == "admin@aicte-india.org").first()
-            if not admin:
-                admin_user = User(
-                    email="admin@aicte-india.org",
-                    hashed_password=hash_password("admin123"),
-                    full_name="AICTE Approval Bureau Head",
-                    role=UserRole.ADMIN,
-                    institution_name="AICTE Headquarters New Delhi",
-                )
-                db.add(admin_user)
-                logger.info("Default admin user created: admin@aicte-india.org")
-
-            # Seed scrutiny officer
-            scrutiny = db.query(User).filter(User.email == "scrutiny@aicte-india.org").first()
-            if not scrutiny:
-                scrutiny_user = User(
-                    email="scrutiny@aicte-india.org",
-                    hashed_password=hash_password("scrutiny123"),
-                    full_name="Regional Scrutiny Officer",
-                    role=UserRole.SCRUTINY,
-                    institution_name="AICTE Regional Office",
-                )
-                db.add(scrutiny_user)
-                logger.info("Default scrutiny officer created: scrutiny@aicte-india.org")
-
-            # Seed institution user
-            inst = db.query(User).filter(User.email == "principal@apex.edu.in").first()
-            if not inst:
-                inst_user = User(
-                    email="principal@apex.edu.in",
-                    hashed_password=hash_password("apex123"),
-                    full_name="Dr. S. K. Ramanathan (Principal)",
-                    role=UserRole.INSTITUTION,
-                    institution_name="Apex Institute of Technology & Engineering",
-                )
-                db.add(inst_user)
-                logger.info("Default institution user created: principal@apex.edu.in")
-
+        if not settings.is_production:
+            for email, password, name, role, inst in DEMO_USERS:
+                user = db.query(User).filter(User.email == email).first()
+                if user is None:
+                    db.add(User(email=email, hashed_password=hash_password(password), full_name=name, role=role, institution_name=inst))
+                elif not verify_password(password, user.hashed_password):
+                    # Upgrade demo accounts created with an older hashing scheme
+                    user.hashed_password = hash_password(password)
             db.commit()
-
-            # Seed compliance rules
-            compliance_service.seed_default_rules(db)
-        finally:
-            db.close()
-    except Exception as e:
-        logger.warning(f"Database initialization warning (will retry on container start): {e}")
+        compliance_service.seed_default_rules(db)
+    finally:
+        db.close()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
-    logger.info("Starting AICTE Validation Platform Backend...")
+    logger.info("Starting Validex backend...")
     init_db()
     yield
-    # Shutdown
-    logger.info("Shutting down AICTE Validation Platform Backend...")
 
 
 app = FastAPI(
     title=settings.APP_NAME,
-    description="Intelligent AICTE Approval Validation, OCR Extraction, Forgery Detection & Evidence-Linked Governance Platform",
-    version="1.0.0",
+    description=(
+        "AI decision-support for AICTE application validation: OCR extraction, configurable checklists, "
+        "tampering indicators, issuing-authority verification, infrastructure CV and a hash-chained audit ledger. "
+        "All AI outputs are advisory; decisions are recorded by authorised officials."
+    ),
+    version="2.0.0",
     lifespan=lifespan,
 )
 
-# CORS Middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=settings.cors_origins_list,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PATCH", "DELETE"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
-# Mount all API endpoints
+
+@app.middleware("http")
+async def request_context_middleware(request: Request, call_next):
+    forwarded = request.headers.get("x-forwarded-for")
+    request_context.client_ip.set(forwarded.split(",")[0].strip() if forwarded else (request.client.host if request.client else None))
+    request_context.actor_role.set(None)
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
+
 app.include_router(api_router)
+# Simulated issuing authorities, served in-process for local demos (separate container in docker-compose)
+app.include_router(mock_authority_router)
 
 
 @app.get("/health")
 def health_check():
-    return {
-        "status": "healthy",
-        "app": settings.APP_NAME,
-        "version": "1.0.0",
-        "debug": settings.DEBUG,
-    }
+    return {"status": "healthy", "app": settings.APP_NAME, "version": "2.0.0",
+            "async_mode": "celery" if settings.USE_CELERY else "background-tasks",
+            "authority_connector": "http" if settings.AUTHORITY_API_URL else "in-process-mock"}
 
 
 @app.get("/")
 def root():
-    return {
-        "message": f"Welcome to {settings.APP_NAME} API",
-        "docs": "/docs",
-        "health": "/health",
-    }
+    return {"message": f"Welcome to {settings.APP_NAME} API", "docs": "/docs", "health": "/health"}

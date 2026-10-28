@@ -2,12 +2,13 @@
 
 from app.core.database import Base
 from app.models.user import User, UserRole
-from app.models.application import Application, ApplicationCategory, ApplicationStatus
+from app.models.application import Application, ApplicationCategory, ApplicationStatus, AIRecommendation
 from app.models.document import Document, DocumentType, DocumentStatus
 from app.models.validation_result import ValidationResult, CheckType, Severity
 from app.models.verification import Verification, VerificationMethod, VerificationStatus
 from app.models.compliance_rule import ComplianceRule, RuleCategory
 from app.models.audit_log import AuditLog
+from app.models.notification import Notification, NotificationStatus
 
 __all__ = [
     "Base",
@@ -16,6 +17,7 @@ __all__ = [
     "Application",
     "ApplicationCategory",
     "ApplicationStatus",
+    "AIRecommendation",
     "Document",
     "DocumentType",
     "DocumentStatus",
@@ -28,4 +30,6 @@ __all__ = [
     "ComplianceRule",
     "RuleCategory",
     "AuditLog",
+    "Notification",
+    "NotificationStatus",
 ]

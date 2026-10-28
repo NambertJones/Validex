@@ -1,146 +1,123 @@
 import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { Cpu, Lock, Mail, ShieldAlert, ArrowRight } from 'lucide-react';
+import { Navigate, useNavigate } from 'react-router-dom';
+import { Cpu, ShieldCheck, Building2, UserCog, Eye } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { authApi, errorMessage } from '../api/client';
+import { Button } from '../components/ui';
+
+// Synthetic demo accounts (seeded only outside production)
+const DEMO = [
+  { group: 'AICTE officials', icon: ShieldCheck, items: [
+    { label: 'Scrutiny Officer', email: 'scrutiny@aicte-india.org', pass: 'scrutiny123' },
+    { label: 'Admin (rules, users)', email: 'admin@aicte-india.org', pass: 'admin123' },
+    { label: 'Expert Committee', email: 'expert@aicte-india.org', pass: 'expert123' },
+  ] },
+  { group: 'Institutions', icon: Building2, items: [
+    { label: 'Apex (clean)', email: 'principal@apex.edu.in', pass: 'apex123' },
+    { label: 'Zenith (problems)', email: 'principal@zenith.edu.in', pass: 'zenith123' },
+    { label: 'Crescent', email: 'principal@crescent.edu.in', pass: 'crescent123' },
+  ] },
+];
 
 export const LoginPage: React.FC = () => {
-  const [email, setEmail] = useState('admin@aicte-india.org');
-  const [password, setPassword] = useState('admin123');
-  const [error, setError] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
-
-  const { login } = useAuth();
+  const { login, user } = useAuth();
   const navigate = useNavigate();
+  const [mode, setMode] = useState<'login' | 'register'>('login');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [fullName, setFullName] = useState('');
+  const [institution, setInstitution] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
 
-  const handleLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
+  if (user) return <Navigate to="/" replace />;
+
+  const doLogin = async (e?: string, p?: string) => {
+    setBusy(true);
     setError('');
-    setIsLoading(true);
     try {
-      await login(email, password);
+      await login(e ?? email, p ?? password);
       navigate('/');
-    } catch (err: any) {
-      setError(err.response?.data?.detail || 'Invalid credentials. Please verify your email and password.');
+    } catch (err) {
+      setError(errorMessage(err));
     } finally {
-      setIsLoading(false);
+      setBusy(false);
     }
   };
 
-  const handleQuickLogin = (demoEmail: string, demoPass: string) => {
-    setEmail(demoEmail);
-    setPassword(demoPass);
+  const doRegister = async () => {
+    setBusy(true);
+    setError('');
+    try {
+      await authApi.register({ email, password, full_name: fullName, institution_name: institution });
+      await doLogin(email, password);
+    } catch (err) {
+      setError(errorMessage(err));
+      setBusy(false);
+    }
   };
 
   return (
-    <div className="min-h-screen w-full flex items-center justify-center bg-slate-50 p-6 relative overflow-hidden">
-      {/* Background ambient glow */}
-      <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-indigo-500/5 rounded-full blur-3xl pointer-events-none" />
-      <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-sky-500/5 rounded-full blur-3xl pointer-events-none" />
-
-      <div className="w-full max-w-md relative z-10">
-        {/* Brand header */}
-        <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-gradient-to-tr from-indigo-600 to-indigo-700 shadow-xl shadow-indigo-600/20 mb-4">
-            <Cpu className="w-8 h-8 text-white" />
+    <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
+      <div className="w-full max-w-4xl grid md:grid-cols-2 gap-6">
+        <div className="glass-panel rounded-2xl p-8">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="w-11 h-11 rounded-xl bg-gradient-to-tr from-indigo-600 to-indigo-700 flex items-center justify-center">
+              <Cpu className="w-6 h-6 text-white" />
+            </div>
+            <div>
+              <h1 className="text-xl font-bold text-slate-900">Validex</h1>
+              <p className="text-xs text-slate-500">AICTE application validation · decision support</p>
+            </div>
           </div>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900">Validex Portal</h1>
-          <p className="text-sm text-slate-500 mt-1">
-            AICTE Intelligent Document Validation, OCR & Forgery Detection System
-          </p>
+
+          <div className="flex gap-1 p-1 bg-slate-100 rounded-xl mb-5 text-xs font-semibold">
+            {(['login', 'register'] as const).map((m) => (
+              <button key={m} onClick={() => setMode(m)} className={`flex-1 py-2 rounded-lg cursor-pointer ${mode === m ? 'bg-white shadow-sm text-slate-900' : 'text-slate-500'}`}>
+                {m === 'login' ? 'Sign in' : 'Register institution'}
+              </button>
+            ))}
+          </div>
+
+          <form
+            className="space-y-3"
+            onSubmit={(e) => {
+              e.preventDefault();
+              mode === 'login' ? doLogin() : doRegister();
+            }}
+          >
+            {mode === 'register' && (
+              <>
+                <input required value={fullName} onChange={(e) => setFullName(e.target.value)} placeholder="Your full name" aria-label="Full name" className="input" />
+                <input required value={institution} onChange={(e) => setInstitution(e.target.value)} placeholder="Institution name (as registered with AICTE)" aria-label="Institution name" className="input" />
+              </>
+            )}
+            <input required type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" aria-label="Email" className="input" autoComplete="username" />
+            <input required type="password" minLength={mode === 'register' ? 8 : 1} value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password" aria-label="Password" className="input" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} />
+            {error && <p className="text-xs text-rose-600 font-medium" role="alert">{error}</p>}
+            <Button type="submit" variant="primary" busy={busy} className="w-full py-2.5">
+              {mode === 'login' ? 'Sign in' : 'Create institution account'}
+            </Button>
+            {mode === 'register' && <p className="text-[11px] text-slate-500">Official (AICTE) accounts are created by an administrator.</p>}
+          </form>
         </div>
 
-        {/* Card */}
-        <div className="bg-white rounded-2xl p-8 shadow-xl border border-slate-200">
-          {error && (
-            <div className="mb-5 p-3 rounded-xl bg-rose-50 border border-rose-200 flex items-center gap-2.5 text-xs text-rose-700">
-              <ShieldAlert className="w-4 h-4 shrink-0 text-rose-600" />
-              <span>{error}</span>
-            </div>
-          )}
-
-          <form onSubmit={handleLogin} className="space-y-4">
-            <div>
-              <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
-                Email Address
-              </label>
-              <div className="relative">
-                <Mail className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-                <input
-                  type="email"
-                  required
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-200 text-sm text-slate-800 pl-10 pr-4 py-2.5 rounded-xl focus:outline-none focus:bg-white focus:border-indigo-600 focus:ring-2 focus:ring-indigo-500/20 transition-all placeholder:text-slate-400"
-                  placeholder="officer@aicte-india.org"
-                />
+        <div className="glass-panel rounded-2xl p-8">
+          <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2"><Eye className="w-4 h-4 text-indigo-600" /> Demo accounts (synthetic data)</h2>
+          <p className="text-xs text-slate-500 mt-1 mb-4">One-click sign in for the prototype demonstration.</p>
+          {DEMO.map((g) => (
+            <div key={g.group} className="mb-4">
+              <p className="text-[11px] uppercase font-bold tracking-wider text-slate-500 mb-2 flex items-center gap-1.5"><g.icon className="w-3.5 h-3.5" /> {g.group}</p>
+              <div className="grid grid-cols-1 gap-2">
+                {g.items.map((d) => (
+                  <button key={d.email} onClick={() => doLogin(d.email, d.pass)} disabled={busy} className="flex items-center justify-between px-3 py-2.5 rounded-xl border border-slate-200 hover:border-indigo-300 hover:bg-indigo-50/40 text-left cursor-pointer disabled:opacity-50">
+                    <span className="text-xs font-semibold text-slate-800 flex items-center gap-2"><UserCog className="w-3.5 h-3.5 text-indigo-600" />{d.label}</span>
+                    <span className="text-[11px] text-slate-500 font-mono">{d.email}</span>
+                  </button>
+                ))}
               </div>
             </div>
-
-            <div>
-              <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
-                Password
-              </label>
-              <div className="relative">
-                <Lock className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-                <input
-                  type="password"
-                  required
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-200 text-sm text-slate-800 pl-10 pr-4 py-2.5 rounded-xl focus:outline-none focus:bg-white focus:border-indigo-600 focus:ring-2 focus:ring-indigo-500/20 transition-all placeholder:text-slate-400"
-                  placeholder="••••••••"
-                />
-              </div>
-            </div>
-
-            <button
-              type="submit"
-              disabled={isLoading}
-              className="w-full mt-2 py-3 px-4 rounded-xl font-semibold text-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:ring-2 focus:ring-indigo-500/40 transition-all flex items-center justify-center gap-2 shadow-md shadow-indigo-600/25 cursor-pointer disabled:opacity-50"
-            >
-              {isLoading ? (
-                <span>Authenticating credentials...</span>
-              ) : (
-                <>
-                  <span>Sign In to Scrutiny Bureau</span>
-                  <ArrowRight className="w-4 h-4" />
-                </>
-              )}
-            </button>
-          </form>
-
-          {/* Quick Demo Credential Selectors */}
-          <div className="mt-8 pt-6 border-t border-slate-100">
-            <p className="text-[11px] uppercase tracking-wider font-bold text-slate-500 mb-3 text-center">
-              Quick Role Test Logins
-            </p>
-            <div className="grid grid-cols-3 gap-2">
-              <button
-                type="button"
-                onClick={() => handleQuickLogin('admin@aicte-india.org', 'admin123')}
-                className="p-2.5 rounded-xl bg-slate-50 hover:bg-indigo-50 hover:border-indigo-200 border border-slate-200 text-[11px] text-slate-700 font-semibold transition-all text-center flex flex-col items-center gap-1 cursor-pointer"
-              >
-                <span className="w-2 h-2 rounded-full bg-indigo-600" />
-                <span>Admin</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => handleQuickLogin('scrutiny@aicte-india.org', 'scrutiny123')}
-                className="p-2.5 rounded-xl bg-slate-50 hover:bg-sky-50 hover:border-sky-200 border border-slate-200 text-[11px] text-slate-700 font-semibold transition-all text-center flex flex-col items-center gap-1 cursor-pointer"
-              >
-                <span className="w-2 h-2 rounded-full bg-sky-600" />
-                <span>Scrutiny</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => handleQuickLogin('principal@apex.edu.in', 'apex123')}
-                className="p-2.5 rounded-xl bg-slate-50 hover:bg-emerald-50 hover:border-emerald-200 border border-slate-200 text-[11px] text-slate-700 font-semibold transition-all text-center flex flex-col items-center gap-1 cursor-pointer"
-              >
-                <span className="w-2 h-2 rounded-full bg-emerald-600" />
-                <span>Institution</span>
-              </button>
-            </div>
-          </div>
+          ))}
         </div>
       </div>
     </div>

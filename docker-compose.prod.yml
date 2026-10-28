@@ -1,105 +1,98 @@
+# Production-style stack: everything on an internal network; only the Nginx front end is exposed.
+# Required in .env: SECRET_KEY, POSTGRES_PASSWORD, MINIO_ROOT_USER, MINIO_ROOT_PASSWORD (see .env.production.example).
+x-backend-env: &backend-env
+  ENVIRONMENT: production
+  DATABASE_URL: postgresql://${POSTGRES_USER:-aicte}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-aicte_validation}
+  REDIS_URL: redis://redis:6379/0
+  USE_CELERY: "true"
+  MINIO_ENDPOINT: minio:9000
+  MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER}
+  MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD}
+  MINIO_BUCKET: aicte-documents
+  AUTHORITY_API_URL: ${AUTHORITY_API_URL:-http://mock-authority:8100}
+  SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY}
+  ACCESS_TOKEN_EXPIRE_MINUTES: "60"
+  RETENTION_DAYS: ${RETENTION_DAYS:-365}
+  CORS_ORIGINS: ${CORS_ORIGINS:-https://validex.example.gov.in}
+
 services:
   postgres:
     image: postgres:16-alpine
     restart: always
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-aicte}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aicte_prod_secret_2026}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB:-aicte_validation}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    networks: [internal]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-aicte} -d ${POSTGRES_DB:-aicte_validation}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-aicte}"]
       interval: 5s
-      timeout: 5s
-      retries: 5
+      retries: 10
 
   redis:
     image: redis:7-alpine
     restart: always
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
+    networks: [internal]
 
   minio:
     image: minio/minio:latest
     restart: always
-    command: server /data --console-address ":9001"
+    command: server /data
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-validex_admin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-validex_storage_secret}
-    volumes:
-      - minio_data:/data
-    healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD}
+    volumes: [minio_data:/data]
+    networks: [internal]
+
+  mock-authority:
+    build: ./backend
+    restart: always
+    command: uvicorn app.mock_authority.main:app --host 0.0.0.0 --port 8100
+    networks: [internal]
 
   backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
+    build: ./backend
     restart: always
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4 --proxy-headers
+    environment: *backend-env
+    volumes: [models:/app/ml_models]
+    networks: [internal]
     depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      minio:
-        condition: service_started
-    environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-aicte}:${POSTGRES_PASSWORD:-aicte_prod_secret_2026}@postgres:5432/${POSTGRES_DB:-aicte_validation}
-      REDIS_URL: redis://redis:6379/0
-      MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-validex_admin}
-      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-validex_storage_secret}
-      MINIO_BUCKET: aicte-documents
-      MINIO_SECURE: "false"
-      SECRET_KEY: ${SECRET_KEY:-validex-super-secret-jwt-key-2026-production}
-      ALGORITHM: HS256
-      ACCESS_TOKEN_EXPIRE_MINUTES: "120"
-      CORS_ORIGINS: "*"
+      postgres: {condition: service_healthy}
 
-  celery_worker:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
+  worker:
+    build: ./backend
     restart: always
-    command: celery -A app.worker.celery worker --loglevel=info --concurrency=4
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      minio:
-        condition: service_started
-    environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-aicte}:${POSTGRES_PASSWORD:-aicte_prod_secret_2026}@postgres:5432/${POSTGRES_DB:-aicte_validation}
-      REDIS_URL: redis://redis:6379/0
-      MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-validex_admin}
-      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-validex_storage_secret}
-      MINIO_BUCKET: aicte-documents
-      MINIO_SECURE: "false"
-      SECRET_KEY: ${SECRET_KEY:-validex-super-secret-jwt-key-2026-production}
+    command: celery -A app.worker.celery worker -Q heavy,light,default --loglevel=info --concurrency=4
+    environment: *backend-env
+    volumes: [models:/app/ml_models]
+    networks: [internal]
+    depends_on: [backend]
+
+  beat:
+    build: ./backend
+    restart: always
+    command: celery -A app.worker.celery beat --loglevel=info
+    environment: *backend-env
+    networks: [internal]
+    depends_on: [redis]
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile.prod
     restart: always
-    ports:
-      - "80:80"
-    depends_on:
-      - backend
+    ports: ["80:80"]
+    networks: [internal, public]
+    depends_on: [backend]
+
+networks:
+  internal:
+    internal: true
+  public:
 
 volumes:
   postgres_data:
-  redis_data:
   minio_data:
+  models:

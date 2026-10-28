@@ -1,4 +1,4 @@
-"""SQLAlchemy AuditLog model for tracking all official decisions and system detections."""
+"""Append-only, hash-chained audit ledger for automated checks and official actions."""
 
 import uuid
 from datetime import datetime, timezone
@@ -13,11 +13,15 @@ class AuditLog(Base):
 
     id = Column(Uuid, primary_key=True, default=uuid.uuid4)
     user_id = Column(Uuid, ForeignKey("users.id"), nullable=True)
-    application_id = Column(Uuid, ForeignKey("applications.id"), nullable=True)
-    action = Column(String(128), nullable=False)  # e.g., "DOC_UPLOAD", "FORGERY_FLAGGED", "STATUS_CHANGE"
+    actor_role = Column(String(32), nullable=True)  # "system" for automated checks
+    application_id = Column(Uuid, ForeignKey("applications.id", ondelete="SET NULL"), nullable=True)
+    action = Column(String(128), nullable=False)  # e.g., "DOCUMENT_UPLOADED", "APPLICATION_DECISION"
     details = Column(JSON, default=dict, nullable=False)
     ip_address = Column(String(64), nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+    # Tamper evidence: each entry stores the hash of the previous entry
+    prev_hash = Column(String(64), nullable=True)
+    entry_hash = Column(String(64), nullable=True, index=True)
 
     user = relationship("User", back_populates="audit_logs")
     application = relationship("Application", back_populates="audit_logs")

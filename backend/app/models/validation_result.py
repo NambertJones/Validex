@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime, timezone
 import enum
-from sqlalchemy import Column, String, Float, DateTime, Enum, ForeignKey, JSON, Uuid
+from sqlalchemy import Column, String, Float, Integer, DateTime, Enum, ForeignKey, JSON, Uuid
 from sqlalchemy.orm import relationship
 
 from app.core.database import Base
@@ -16,6 +16,9 @@ class CheckType(str, enum.Enum):
     FORGERY = "forgery"
     COMPLIANCE = "compliance"
     INFRASTRUCTURE = "infrastructure"
+    DUPLICATE = "duplicate"
+    VERIFICATION = "verification"
+    RECORDS = "records"
 
 
 class Severity(str, enum.Enum):
@@ -25,6 +28,8 @@ class Severity(str, enum.Enum):
 
 
 class ValidationResult(Base):
+    """One evidence-linked finding. Findings are advisory indicators, never verdicts."""
+
     __tablename__ = "validation_results"
 
     id = Column(Uuid, primary_key=True, default=uuid.uuid4)
@@ -33,9 +38,13 @@ class ValidationResult(Base):
     check_type = Column(Enum(CheckType), nullable=False)
     severity = Column(Enum(Severity), default=Severity.INFO, nullable=False)
     finding = Column(String(500), nullable=False)
-    evidence = Column(String(1000), nullable=True)
+    evidence = Column(String(2000), nullable=True)
+    # Plain-language instruction shown to the institution on how to rectify
+    fix_hint = Column(String(1000), nullable=True)
     details = Column(JSON, default=dict, nullable=False)
     confidence = Column(Float, default=1.0, nullable=False)
+    rule_code = Column(String(64), nullable=True)
+    rule_version = Column(Integer, nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     application = relationship("Application", back_populates="validation_results")

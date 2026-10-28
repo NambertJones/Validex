@@ -1,4 +1,4 @@
-"""Validation triggering, findings inspection, and audit report generation endpoints."""
+"""AI pre-screening: trigger, evidence-linked report, raw findings."""
 
 import uuid
 from datetime import datetime, timezone
@@ -7,95 +7,57 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.dependencies import get_current_user
+from app.core.dependencies import get_application_for_user, get_current_user, is_official
+from app.models.application import ApplicationStatus
 from app.models.user import User
-from app.models.application import Application
-from app.models.validation_result import ValidationResult, Severity
-from app.schemas.validation import (
-    ValidationReportResponse,
-    ValidationResultResponse,
-    ValidationSummary,
-)
-from app.services.validation_service import validation_service
+from app.models.validation_result import Severity, ValidationResult
+from app.schemas.validation import ValidationReportResponse, ValidationResultResponse, ValidationSummary
+from app.services.validation_service import SEVERITY_POINTS, validation_service
 
-router = APIRouter(prefix="/validation", tags=["Validation & Fraud Detection"])
+router = APIRouter(prefix="/validation", tags=["AI Pre-screening"])
+
+SEVERITY_ORDER = {Severity.CRITICAL: 0, Severity.WARNING: 1, Severity.INFO: 2}
+DISCLAIMER = ("AI-generated findings are decision-support only. Forgery indicators are preliminary and require human "
+              "verification. Statutory scrutiny, inspection and final decisions rest with the competent AICTE authority.")
 
 
 @router.post("/trigger/{app_id}")
-def trigger_validation(
-    app_id: uuid.UUID,
-    db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User, Depends(get_current_user)],
-):
-    """Trigger the complete validation pipeline on an AICTE application:
-    Runs completeness, expiry, consistency, and risk scoring.
-    """
-    app = db.query(Application).filter(Application.id == app_id).first()
-    if not app:
-        raise HTTPException(status_code=404, detail="Application not found")
-
-    result = validation_service.validate_application(db=db, application_id=app_id)
-    return {"message": "Validation complete", "data": result}
+def trigger_validation(app_id: uuid.UUID, db: Annotated[Session, Depends(get_db)],
+                       current_user: Annotated[User, Depends(get_current_user)]):
+    """Officials can re-run screening any time; institutions can self-check while drafting or rectifying."""
+    app = get_application_for_user(db, app_id, current_user)
+    if not is_official(current_user) and app.status not in (ApplicationStatus.DRAFT, ApplicationStatus.DEFICIENCY_FOUND):
+        raise HTTPException(status_code=409, detail="Self-check is available while drafting or rectifying")
+    return {"message": "Pre-screening complete", "data": validation_service.validate_application(db, app.id, current_user.id)}
 
 
 @router.get("/report/{app_id}", response_model=ValidationReportResponse)
-def get_validation_report(
-    app_id: uuid.UUID,
-    db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User, Depends(get_current_user)],
-):
-    """Retrieve the official structured AI decision-support report with evidence links."""
-    app = db.query(Application).filter(Application.id == app_id).first()
-    if not app:
-        raise HTTPException(status_code=404, detail="Application not found")
-
-    findings = (
-        db.query(ValidationResult)
-        .filter(ValidationResult.application_id == app_id)
-        .order_by(ValidationResult.severity.desc(), ValidationResult.created_at.desc())
-        .all()
+def get_validation_report(app_id: uuid.UUID, db: Annotated[Session, Depends(get_db)],
+                          current_user: Annotated[User, Depends(get_current_user)]):
+    app = get_application_for_user(db, app_id, current_user)
+    findings = sorted(
+        db.query(ValidationResult).filter(ValidationResult.application_id == app.id).all(),
+        key=lambda f: (SEVERITY_ORDER[f.severity], f.check_type.value),
     )
-
-    crit_count = sum(1 for f in findings if f.severity == Severity.CRITICAL)
-    warn_count = sum(1 for f in findings if f.severity == Severity.WARNING)
-    info_count = sum(1 for f in findings if f.severity == Severity.INFO)
-    clean_count = max(len(app.documents) * 3 - len(findings), 0)
-
-    rec = "Approved for next stage"
-    if crit_count > 0:
-        rec = "Reject / Issue Deficiency Notice"
-    elif warn_count > 0:
-        rec = "Scrutiny Review with Clarifications Requested"
-
+    counts = {s: sum(1 for f in findings if f.severity == s) for s in Severity}
     summary = ValidationSummary(
-        total_checks=len(findings) + clean_count,
-        critical_flags=crit_count,
-        warning_flags=warn_count,
-        info_flags=info_count,
-        clean_checks=clean_count,
+        critical_flags=counts[Severity.CRITICAL], warning_flags=counts[Severity.WARNING], info_flags=counts[Severity.INFO],
         risk_score=app.risk_score,
-        status_recommendation=rec,
+        ai_recommendation=app.ai_recommendation.value if app.ai_recommendation else None,
+        ai_summary=app.ai_summary,
+        risk_contributions=[{"finding": f.finding, "severity": f.severity.value, "points": SEVERITY_POINTS[f.severity]}
+                            for f in findings if SEVERITY_POINTS[f.severity] > 0],
     )
-
-    finding_responses = [ValidationResultResponse.model_validate(f) for f in findings]
-
     return ValidationReportResponse(
-        application_id=app.id,
-        application_number=app.application_number,
-        institution_name=app.institution_name,
-        risk_score=app.risk_score,
-        summary=summary,
-        findings=finding_responses,
-        generated_at=datetime.now(timezone.utc),
+        application_id=app.id, application_number=app.application_number, institution_name=app.institution_name,
+        risk_score=app.risk_score, summary=summary,
+        findings=[ValidationResultResponse.model_validate(f) for f in findings],
+        generated_at=datetime.now(timezone.utc), disclaimer=DISCLAIMER,
     )
 
 
 @router.get("/results/{app_id}", response_model=list[ValidationResultResponse])
-def get_validation_results(
-    app_id: uuid.UUID,
-    db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User, Depends(get_current_user)],
-):
-    """List all raw validation findings for an application."""
-    findings = db.query(ValidationResult).filter(ValidationResult.application_id == app_id).all()
-    return findings
+def get_validation_results(app_id: uuid.UUID, db: Annotated[Session, Depends(get_db)],
+                           current_user: Annotated[User, Depends(get_current_user)]):
+    app = get_application_for_user(db, app_id, current_user)
+    return db.query(ValidationResult).filter(ValidationResult.application_id == app.id).all()

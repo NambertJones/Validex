@@ -5,11 +5,13 @@ export interface User {
   email: string;
   full_name: string;
   role: UserRole;
-  institution_name?: string;
+  institution_name?: string | null;
   is_active: boolean;
+  created_at?: string;
 }
 
 export type ApplicationStatus =
+  | 'draft'
   | 'submitted'
   | 'under_review'
   | 'deficiency_found'
@@ -17,27 +19,45 @@ export type ApplicationStatus =
   | 'approved'
   | 'rejected';
 
-export type ApplicationCategory =
-  | 'eoa'
-  | 'new_institution'
-  | 'change_intake'
-  | 'closure'
-  | 'other';
+export type ApplicationCategory = 'eoa' | 'new_institution' | 'change_intake' | 'closure' | 'other';
+
+export type AIRecommendation =
+  | 'pending'
+  | 'forward_for_approval'
+  | 'seek_clarification'
+  | 'deficiency_suspected'
+  | 'physical_inspection_suggested';
+
+export interface ChecklistItem {
+  doc_type: DocumentType;
+  rule_code: string;
+  title: string;
+  description: string;
+  fix_hint?: string;
+}
 
 export interface Application {
   id: string;
   application_number: string;
   institution_id: string;
   institution_name: string;
+  permanent_id?: string | null;
+  requested_intake?: number | null;
   category: ApplicationCategory;
   academic_year: string;
   status: ApplicationStatus;
   risk_score: number;
-  overall_verdict?: string;
+  ai_recommendation?: AIRecommendation | null;
+  ai_summary?: string | null;
+  ai_reviewed_at?: string | null;
+  overall_verdict?: string | null;
+  decided_at?: string | null;
+  rectification_due?: string | null;
   submitted_at: string;
   updated_at: string;
   documents?: DocumentItem[];
   validation_results?: ValidationResult[];
+  checklist?: ChecklistItem[];
   total_documents?: number;
   pending_documents?: number;
   flagged_documents?: number;
@@ -54,12 +74,25 @@ export type DocumentType =
   | 'lab_photo'
   | 'other';
 
-export type DocumentStatus =
-  | 'pending'
-  | 'processing'
-  | 'validated'
-  | 'flagged'
-  | 'rejected';
+export type DocumentStatus = 'pending' | 'processing' | 'validated' | 'flagged' | 'rejected' | 'failed';
+
+export interface Box {
+  page?: number;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  label?: string;
+}
+
+export interface Indicator {
+  method: string;
+  strength: 'weak' | 'medium' | 'strong';
+  description: string;
+  hidden_text?: string;
+  visible_text?: string;
+  boxes?: Box[];
+}
 
 export interface DocumentItem {
   id: string;
@@ -71,8 +104,42 @@ export interface DocumentItem {
   status: DocumentStatus;
   extracted_data: Record<string, any>;
   page_count: number;
+  processing_stage?: string | null;
+  processing_progress?: number | null;
+  is_current: boolean;
+  superseded_by_id?: string | null;
   uploaded_at: string;
-  download_url?: string;
+}
+
+export interface FieldComparison {
+  field: string;
+  submitted: any;
+  official: any;
+  kind: string;
+  match: boolean | null;
+  score: number | null;
+  reason: string;
+}
+
+export interface Verification {
+  id: string;
+  document_id: string;
+  method: 'api' | 'qr_code' | 'digital_signature' | 'portal' | 'manual';
+  source_authority: string;
+  status: 'verified' | 'mismatch' | 'expired' | 'pending' | 'unavailable' | 'manual_review';
+  request_identifiers?: Record<string, any> | null;
+  source_response: Record<string, any>;
+  field_comparison?: FieldComparison[] | null;
+  reason?: string | null;
+  attempts?: number | null;
+  next_retry_at?: string | null;
+  verified_at: string;
+}
+
+export interface DocumentDetail extends DocumentItem {
+  verifications: Verification[];
+  findings: ValidationResult[];
+  versions: { id: string; filename: string; uploaded_at: string; is_current: boolean; status: string }[];
 }
 
 export type Severity = 'info' | 'warning' | 'critical';
@@ -82,18 +149,24 @@ export type CheckType =
   | 'consistency'
   | 'forgery'
   | 'compliance'
-  | 'infrastructure';
+  | 'infrastructure'
+  | 'duplicate'
+  | 'verification'
+  | 'records';
 
 export interface ValidationResult {
   id: string;
   application_id: string;
-  document_id?: string;
+  document_id?: string | null;
   check_type: CheckType;
   severity: Severity;
   finding: string;
-  evidence?: string;
+  evidence?: string | null;
+  fix_hint?: string | null;
   details: Record<string, any>;
   confidence: number;
+  rule_code?: string | null;
+  rule_version?: number | null;
   created_at: string;
 }
 
@@ -103,27 +176,39 @@ export interface ValidationReport {
   institution_name: string;
   risk_score: number;
   summary: {
-    total_checks: number;
     critical_flags: number;
     warning_flags: number;
     info_flags: number;
-    clean_checks: number;
     risk_score: number;
-    status_recommendation: string;
+    ai_recommendation: AIRecommendation | null;
+    ai_summary: string | null;
+    risk_contributions: { finding: string; severity: Severity; points: number }[];
   };
   findings: ValidationResult[];
   generated_at: string;
+  disclaimer: string;
 }
 
 export interface DashboardStats {
   total_applications: number;
-  under_review: number;
+  awaiting_review: number;
   deficiency_found: number;
-  verified_approved: number;
+  approved: number;
+  rejected: number;
   high_risk_flagged: number;
-  avg_processing_time_hours: number;
   total_documents_processed: number;
-  forgery_detected_count: number;
+  tamper_suspected_count: number;
+  duplicate_flags: number;
+  pending_source_verifications: number;
+  avg_processing_seconds_per_document: number | null;
+  overdue_rectifications: number;
+}
+
+export interface Metrics {
+  verification: { total_checks: number; by_status: Record<string, number>; automated_completion_rate: number | null };
+  forensics: { documents: number; by_level: Record<string, number> };
+  processing: { documents_with_timing: number; avg_seconds_per_document: number | null; max_seconds: number | null };
+  decisions: { decided: number; ai_human_agreement_rate: number | null; duplicate_findings: number };
 }
 
 export interface RiskDistributionItem {
@@ -138,7 +223,8 @@ export interface AlertItem {
   application_number: string;
   institution_name: string;
   title: string;
-  severity: 'critical' | 'warning' | 'info';
+  severity: Severity;
+  check_type: CheckType;
   message: string;
   created_at: string;
 }
@@ -152,14 +238,26 @@ export interface ActivityItem {
   details: string;
 }
 
+export interface RuleCheck {
+  fact: string;
+  op: string;
+  value?: any;
+  label?: string;
+}
+
 export interface ComplianceRule {
   id: string;
   rule_code: string;
   title: string;
-  category: string;
+  category: 'infrastructure' | 'academic' | 'financial' | 'statutory' | 'safety';
   description: string;
-  conditions: Record<string, any>;
+  conditions: { requires_doc?: DocumentType; check?: RuleCheck; fix_hint?: string; on_missing_fact?: string; [k: string]: any };
+  applies_to?: string[] | null;
+  severity?: Severity | null;
+  handbook_reference?: string | null;
+  version: number;
   is_active: boolean;
+  updated_at: string;
 }
 
 export interface ComplianceEvaluation {
@@ -174,6 +272,50 @@ export interface ComplianceEvaluation {
     category: string;
     status: 'compliant' | 'non_compliant' | 'warning' | 'not_applicable';
     message: string;
-    evidence?: string;
+    evidence?: string | null;
+    rule_version?: number | null;
+    expected?: string | null;
+    actual?: string | null;
+    fix_hint?: string | null;
   }[];
+}
+
+export interface NotificationItem {
+  id: string;
+  application_id: string;
+  subject: string;
+  body: string;
+  items: { finding_id: string; document_id?: string; doc_type?: string; filename?: string; severity: Severity; message: string; fix_hint: string; rule_code?: string }[];
+  channels: string[];
+  status: 'sent' | 'acknowledged' | 'resolved';
+  due_date?: string | null;
+  created_at: string;
+  acknowledged_at?: string | null;
+}
+
+export interface AuditEntry {
+  id: string;
+  action: string;
+  details: Record<string, any>;
+  ip_address?: string | null;
+  created_at: string;
+  user_id?: string | null;
+  actor: string;
+  actor_role?: string | null;
+  application_id?: string | null;
+  entry_hash?: string | null;
+  prev_hash?: string | null;
+}
+
+export interface InfraReport {
+  status: 'analyzed' | 'detector_unavailable' | 'unreadable';
+  model: string | null;
+  equipment_counts: Record<string, number>;
+  raw_detections: Record<string, number>;
+  compliance_flags: { equipment: string; object: string; required: number; detected: number | null; status: string; message: string; rule_code?: string }[];
+  evidence_quality: { brightness?: number; sharpness?: number; resolution?: number[]; issues: string[] };
+  frames_analyzed: number;
+  annotated_image_base64?: string | null;
+  needs_manual_review: boolean;
+  disclaimer: string;
 }

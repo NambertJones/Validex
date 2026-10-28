@@ -1,28 +1,27 @@
-"""Pydantic schemas for executive dashboard metrics, alerts, and timeline."""
+"""Pydantic schemas for dashboard metrics, alerts and activity."""
 
 from datetime import datetime
+from typing import Any
 from pydantic import BaseModel
-
-
-class StatMetric(BaseModel):
-    value: int | float
-    change_pct: float | None = None
-    label: str
 
 
 class DashboardStatsResponse(BaseModel):
     total_applications: int
-    under_review: int
+    awaiting_review: int
     deficiency_found: int
-    verified_approved: int
+    approved: int
+    rejected: int
     high_risk_flagged: int
-    avg_processing_time_hours: float
     total_documents_processed: int
-    forgery_detected_count: int
+    tamper_suspected_count: int
+    duplicate_flags: int
+    pending_source_verifications: int
+    avg_processing_seconds_per_document: float | None
+    overdue_rectifications: int
 
 
 class RiskDistributionItem(BaseModel):
-    category: str  # "Low Risk", "Medium Risk", "High Risk", "Critical"
+    category: str
     count: int
     color: str
 
@@ -33,7 +32,8 @@ class AlertItem(BaseModel):
     application_number: str
     institution_name: str
     title: str
-    severity: str  # "critical", "warning", "info"
+    severity: str
+    check_type: str
     message: str
     created_at: datetime
 
@@ -45,3 +45,10 @@ class ActivityItem(BaseModel):
     institution_name: str
     timestamp: datetime
     details: str
+
+
+class MetricsResponse(BaseModel):
+    verification: dict[str, Any]
+    forensics: dict[str, Any]
+    processing: dict[str, Any]
+    decisions: dict[str, Any]

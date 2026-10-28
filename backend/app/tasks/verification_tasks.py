@@ -1,28 +1,36 @@
-"""Celery task for background third-party authority verification."""
+"""Light-queue tasks: issuing-authority verification with backoff retries and a periodic sweep."""
 
-import logging
+import uuid
+from datetime import datetime, timezone
+
 from app.core.celery_app import celery
 from app.core.database import SessionLocal
+from app.models.verification import Verification, VerificationStatus
 from app.services.verification_service import verification_service
 
-logger = logging.getLogger(__name__)
 
-
-@celery.task(bind=True, name="app.tasks.verification_tasks.verify_document_task", max_retries=3)
-def verify_document_task(self, document_id: str, authority: str = "DigiLocker"):
-    """Background task to query state authority / DigiLocker APIs."""
+@celery.task(name="app.tasks.verification_tasks.verify_document_task")
+def verify_document_task(document_id: str):
     db = SessionLocal()
     try:
-        import uuid
-        ver = verification_service.verify_document(
-            db=db,
-            document_id=uuid.UUID(document_id),
-            source_authority=authority,
-        )
-        return {"status": "success", "verification_id": str(ver.id), "result": ver.status.value}
-    except Exception as exc:
-        logger.error(f"Verification task error: {exc}")
-        db.rollback()
-        raise self.retry(exc=exc, countdown=30)
+        results = verification_service.verify_document(db, uuid.UUID(document_id))
+        return [{"method": v.method.value, "status": v.status.value} for v in results]
+    finally:
+        db.close()
+
+
+@celery.task(name="app.tasks.verification_tasks.retry_due_verifications")
+def retry_due_verifications():
+    """Re-run checks whose source was unavailable/pending and whose retry time has arrived."""
+    db = SessionLocal()
+    try:
+        now = datetime.now(timezone.utc)
+        due = (db.query(Verification.document_id)
+               .filter(Verification.status.in_([VerificationStatus.UNAVAILABLE, VerificationStatus.PENDING]),
+                       Verification.next_retry_at <= now)
+               .distinct().all())
+        for (doc_id,) in due:
+            verify_document_task.delay(str(doc_id))
+        return {"queued": len(due)}
     finally:
         db.close()

@@ -1,9 +1,10 @@
-"""Storage client supporting both MinIO S3 and local filesystem fallback."""
+"""Storage client supporting MinIO (S3) with a local filesystem fallback."""
 
 import io
 import os
 import logging
-from typing import Any
+from datetime import timedelta
+
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -16,7 +17,7 @@ except ImportError:
 
 
 class StorageManager:
-    """Manages document uploads, retrievals, and bucket initialization with local fallback."""
+    """Manages document uploads and retrievals. Object names are generated server-side only."""
 
     def __init__(self):
         self.bucket = settings.MINIO_BUCKET
@@ -24,7 +25,7 @@ class StorageManager:
         os.makedirs(self.local_dir, exist_ok=True)
         self.client = None
 
-        if HAS_MINIO:
+        if HAS_MINIO and settings.USE_MINIO:
             try:
                 self.client = Minio(
                     settings.MINIO_ENDPOINT,
@@ -41,21 +42,20 @@ class StorageManager:
         if self.client and not self.client.bucket_exists(self.bucket):
             self.client.make_bucket(self.bucket)
 
-    def upload_bytes(
-        self,
-        file_bytes: bytes,
-        object_name: str,
-        content_type: str = "application/octet-stream",
-    ) -> str:
-        """Upload raw bytes to MinIO or local filesystem storage."""
+    def _local_path(self, object_name: str) -> str:
+        path = os.path.abspath(os.path.join(self.local_dir, object_name.replace("/", os.sep)))
+        if not path.startswith(self.local_dir + os.sep):
+            raise ValueError("Invalid object name")
+        return path
+
+    def upload_bytes(self, file_bytes: bytes, object_name: str, content_type: str = "application/octet-stream") -> str:
         if self.client:
             try:
                 self._ensure_bucket()
-                data_stream = io.BytesIO(file_bytes)
                 self.client.put_object(
                     bucket_name=self.bucket,
                     object_name=object_name,
-                    data=data_stream,
+                    data=io.BytesIO(file_bytes),
                     length=len(file_bytes),
                     content_type=content_type,
                 )
@@ -63,15 +63,14 @@ class StorageManager:
             except Exception as e:
                 logger.warning(f"MinIO upload error: {e}, falling back to disk.")
 
-        # Local fallback
-        local_path = os.path.join(self.local_dir, object_name.replace("/", os.sep))
+        local_path = self._local_path(object_name)
         os.makedirs(os.path.dirname(local_path), exist_ok=True)
         with open(local_path, "wb") as f:
             f.write(file_bytes)
         return object_name
 
     def get_bytes(self, object_name: str) -> bytes:
-        """Download file bytes from MinIO or local filesystem."""
+        """Return the stored bytes; raises FileNotFoundError when the object does not exist."""
         if self.client:
             try:
                 response = self.client.get_object(self.bucket, object_name)
@@ -83,24 +82,31 @@ class StorageManager:
             except Exception as e:
                 logger.warning(f"MinIO get error: {e}, falling back to disk.")
 
-        # Local fallback
-        local_path = os.path.join(self.local_dir, object_name.replace("/", os.sep))
-        if os.path.exists(local_path):
-            with open(local_path, "rb") as f:
-                return f.read()
-        return b"%PDF-1.4 Mock Document Content"
+        local_path = self._local_path(object_name)
+        if not os.path.exists(local_path):
+            raise FileNotFoundError(object_name)
+        with open(local_path, "rb") as f:
+            return f.read()
 
-    def get_presigned_url(self, object_name: str, expires_seconds: int = 3600) -> str:
-        """Generate presigned GET URL or direct API preview endpoint."""
+    def delete(self, object_name: str) -> None:
         if self.client:
             try:
-                from datetime import timedelta
+                self.client.remove_object(self.bucket, object_name)
+            except Exception as e:
+                logger.warning(f"MinIO delete error: {e}")
+        local_path = self._local_path(object_name)
+        if os.path.exists(local_path):
+            os.remove(local_path)
+
+    def get_presigned_url(self, object_name: str, expires_seconds: int = 900) -> str | None:
+        if self.client:
+            try:
                 return self.client.presigned_get_object(
                     self.bucket, object_name, expires=timedelta(seconds=expires_seconds)
                 )
             except Exception:
                 pass
-        return f"/api/documents/preview/{object_name}"
+        return None
 
 
 storage = StorageManager()

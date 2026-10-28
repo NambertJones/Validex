@@ -47,6 +47,30 @@
   transform: translateY(-2px);
 }
 
+.input {
+  width: 100%;
+  background: #FFFFFF;
+  border: 1px solid #E2E8F0;
+  border-radius: 0.75rem;
+  padding: 0.55rem 0.85rem;
+  font-size: 0.8125rem;
+  color: #0F172A;
+  outline: none;
+}
+.input:focus {
+  border-color: #6366F1;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
+}
+.label {
+  display: block;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #64748B;
+  margin-bottom: 0.3rem;
+}
+
 /* Custom scrollbars */
 ::-webkit-scrollbar {
   width: 6px;

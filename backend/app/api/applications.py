@@ -1,168 +1,187 @@
-"""Application management endpoints (CRUD, status updates, listings)."""
+"""Applications: institution drafting/submission and official decisions (human-in-the-loop)."""
 
-import random
+import secrets
 import uuid
+from datetime import datetime, timezone
 from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy.orm import Session
 from sqlalchemy import desc
+from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.dependencies import get_current_user, require_role
+from app.core.dependencies import get_application_for_user, get_current_user, is_official, require_official, require_role
+from app.models.application import AIRecommendation, Application, ApplicationCategory, ApplicationStatus
+from app.models.document import DocumentStatus
 from app.models.user import User, UserRole
-from app.models.application import Application, ApplicationStatus, ApplicationCategory
-from app.models.document import Document, DocumentStatus
 from app.schemas.application import (
-    ApplicationCreate,
-    ApplicationStatusUpdate,
-    ApplicationResponse,
-    ApplicationDetailResponse,
+    ApplicationCreate, ApplicationDecision, ApplicationDetailResponse, ApplicationResponse, DeficiencyNoticeRequest,
 )
 from app.schemas.document import DocumentResponse
+from app.schemas.notification import NotificationResponse
 from app.schemas.validation import ValidationResultResponse
 from app.services.audit_service import audit_service
+from app.services.compliance_service import compliance_service
+from app.services.notification_service import notification_service
+from app.services.validation_service import validation_service
 
 router = APIRouter(prefix="/applications", tags=["Applications"])
 
+EDITABLE = {ApplicationStatus.DRAFT, ApplicationStatus.DEFICIENCY_FOUND}
+ADVERSE = {ApplicationStatus.REJECTED, ApplicationStatus.DEFICIENCY_FOUND}
+require_institution = require_role([UserRole.INSTITUTION])
 
-def generate_app_number() -> str:
-    return f"AICTE-2025-{random.randint(10000, 99999)}"
+
+def _new_number(db: Session) -> str:
+    year = datetime.now(timezone.utc).year
+    while True:
+        number = f"AICTE-{year}-{secrets.randbelow(900000) + 100000}"
+        if not db.query(Application).filter(Application.application_number == number).first():
+            return number
 
 
 @router.post("", response_model=ApplicationResponse, status_code=status.HTTP_201_CREATED)
-def create_application(
-    app_in: ApplicationCreate,
-    current_user: Annotated[User, Depends(get_current_user)],
-    db: Annotated[Session, Depends(get_db)],
-):
-    """Create a new AICTE approval application."""
-    inst_name = app_in.institution_name or current_user.institution_name or "Apex Institute of Technology"
+def create_application(app_in: ApplicationCreate, current_user: Annotated[User, Depends(require_institution)],
+                       db: Annotated[Session, Depends(get_db)]):
+    """Institution starts a draft application. Officials do not see drafts until submitted."""
     app = Application(
-        application_number=generate_app_number(),
-        institution_id=current_user.id,
-        institution_name=inst_name,
-        category=app_in.category,
-        academic_year=app_in.academic_year,
-        status=ApplicationStatus.SUBMITTED,
-        risk_score=0.0,
+        application_number=_new_number(db), institution_id=current_user.id,
+        institution_name=current_user.institution_name or current_user.full_name,
+        permanent_id=app_in.permanent_id, requested_intake=app_in.requested_intake,
+        category=app_in.category, academic_year=app_in.academic_year, status=ApplicationStatus.DRAFT,
+        ai_recommendation=AIRecommendation.PENDING,
     )
     db.add(app)
     db.commit()
     db.refresh(app)
-
-    audit_service.log_event(
-        db=db,
-        action="APPLICATION_CREATED",
-        user_id=current_user.id,
-        application_id=app.id,
-        details={"application_number": app.application_number, "category": app.category.value},
-    )
+    audit_service.log_event(db=db, action="APPLICATION_CREATED", user_id=current_user.id, application_id=app.id,
+                            details={"application_number": app.application_number, "category": app.category.value})
     return app
 
 
 @router.get("", response_model=list[ApplicationResponse])
 def list_applications(
-    db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User, Depends(get_current_user)],
-    status: ApplicationStatus | None = Query(None),
-    category: ApplicationCategory | None = Query(None),
-    search: str | None = Query(None),
-    skip: int = 0,
-    limit: int = 50,
+    db: Annotated[Session, Depends(get_db)], current_user: Annotated[User, Depends(get_current_user)],
+    status: ApplicationStatus | None = Query(None), category: ApplicationCategory | None = Query(None),
+    search: str | None = Query(None, max_length=100), skip: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=200),
 ):
-    """List applications with optional status and category filters."""
     query = db.query(Application)
-
-    # Institutions only see their own applications
     if current_user.role == UserRole.INSTITUTION:
         query = query.filter(Application.institution_id == current_user.id)
-
+    elif status is None:
+        query = query.filter(Application.status != ApplicationStatus.DRAFT)
     if status:
         query = query.filter(Application.status == status)
     if category:
         query = query.filter(Application.category == category)
     if search:
-        search_filter = f"%{search}%"
-        query = query.filter(
-            (Application.institution_name.ilike(search_filter))
-            | (Application.application_number.ilike(search_filter))
-        )
-
-    return query.order_by(desc(Application.submitted_at)).offset(skip).limit(limit).all()
+        like = f"%{search}%"
+        query = query.filter(Application.institution_name.ilike(like) | Application.application_number.ilike(like))
+    return query.order_by(desc(Application.risk_score), desc(Application.submitted_at)).offset(skip).limit(limit).all()
 
 
 @router.get("/{app_id}", response_model=ApplicationDetailResponse)
-def get_application(
-    app_id: uuid.UUID,
-    db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User, Depends(get_current_user)],
-):
-    """Get complete details of an application including documents and findings."""
-    app = db.query(Application).filter(Application.id == app_id).first()
-    if not app:
+def get_application(app_id: uuid.UUID, db: Annotated[Session, Depends(get_db)],
+                    current_user: Annotated[User, Depends(get_current_user)]):
+    app = get_application_for_user(db, app_id, current_user)
+    if is_official(current_user) and app.status == ApplicationStatus.DRAFT:
         raise HTTPException(status_code=404, detail="Application not found")
-
-    if current_user.role == UserRole.INSTITUTION and app.institution_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not authorized to view this application")
-
-    total_docs = len(app.documents)
-    pending_docs = sum(1 for d in app.documents if d.status == DocumentStatus.PENDING)
-    flagged_docs = sum(1 for d in app.documents if d.status == DocumentStatus.FLAGGED)
-
-    doc_responses = [DocumentResponse.model_validate(d) for d in app.documents]
-    val_responses = [ValidationResultResponse.model_validate(v) for v in app.validation_results]
-
+    current = [d for d in app.documents if d.is_current]
+    base = ApplicationResponse.model_validate(app).model_dump()
     return ApplicationDetailResponse(
-        id=app.id,
-        application_number=app.application_number,
-        institution_id=app.institution_id,
-        institution_name=app.institution_name,
-        category=app.category,
-        academic_year=app.academic_year,
-        status=app.status,
-        risk_score=app.risk_score,
-        overall_verdict=app.overall_verdict,
-        submitted_at=app.submitted_at,
-        updated_at=app.updated_at,
-        documents=doc_responses,
-        validation_results=val_responses,
-        total_documents=total_docs,
-        pending_documents=pending_docs,
-        flagged_documents=flagged_docs,
+        **base,
+        documents=[DocumentResponse.model_validate(d) for d in sorted(app.documents, key=lambda d: d.uploaded_at)],
+        validation_results=[ValidationResultResponse.model_validate(v) for v in app.validation_results],
+        checklist=compliance_service.checklist(db, app),
+        total_documents=len(current),
+        pending_documents=sum(1 for d in current if d.status in (DocumentStatus.PENDING, DocumentStatus.PROCESSING)),
+        flagged_documents=sum(1 for d in current if d.status == DocumentStatus.FLAGGED),
     )
 
 
-@router.patch("/{app_id}/status", response_model=ApplicationResponse)
-def update_application_status(
-    app_id: uuid.UUID,
-    status_update: ApplicationStatusUpdate,
-    current_user: Annotated[
-        User,
-        Depends(require_role([UserRole.ADMIN, UserRole.SCRUTINY, UserRole.EXPERT])),
-    ],
-    db: Annotated[Session, Depends(get_db)],
-):
-    """Official action: Update the verification / approval status of an application."""
-    app = db.query(Application).filter(Application.id == app_id).first()
-    if not app:
-        raise HTTPException(status_code=404, detail="Application not found")
+@router.patch("/{app_id}", response_model=ApplicationResponse)
+def update_draft(app_id: uuid.UUID, app_in: ApplicationCreate, db: Annotated[Session, Depends(get_db)],
+                 current_user: Annotated[User, Depends(require_institution)]):
+    app = get_application_for_user(db, app_id, current_user)
+    if app.status not in EDITABLE:
+        raise HTTPException(status_code=409, detail="Application can only be edited while in draft or rectification")
+    app.permanent_id, app.requested_intake = app_in.permanent_id, app_in.requested_intake
+    app.category, app.academic_year = app_in.category, app_in.academic_year
+    db.commit()
+    audit_service.log_event(db=db, action="APPLICATION_EDITED", user_id=current_user.id, application_id=app.id,
+                            details=app_in.model_dump(mode="json"))
+    return app
 
-    old_status = app.status
-    app.status = status_update.status
-    if status_update.verdict_notes:
-        app.overall_verdict = status_update.verdict_notes
+
+@router.post("/{app_id}/submit", response_model=ApplicationResponse)
+def submit_application(app_id: uuid.UUID, db: Annotated[Session, Depends(get_db)],
+                       current_user: Annotated[User, Depends(require_institution)]):
+    """Submit (or resubmit after rectification). Runs AI pre-screening for the official queue."""
+    app = get_application_for_user(db, app_id, current_user)
+    if app.status not in EDITABLE:
+        raise HTTPException(status_code=409, detail=f"Cannot submit an application in status '{app.status.value}'")
+    if any(d.status in (DocumentStatus.PENDING, DocumentStatus.PROCESSING) for d in app.documents if d.is_current):
+        raise HTTPException(status_code=409, detail="Documents are still being processed; submit when processing completes")
+    previous = app.status
+    app.status = ApplicationStatus.SUBMITTED
+    app.submitted_at = datetime.now(timezone.utc)
+    db.commit()
+    audit_service.log_event(db=db, action="APPLICATION_SUBMITTED" if previous == ApplicationStatus.DRAFT else "APPLICATION_RESUBMITTED",
+                            user_id=current_user.id, application_id=app.id, details={"from": previous.value})
+    validation_service.validate_application(db, app.id, user_id=current_user.id)
+    db.refresh(app)
+    return app
+
+
+@router.post("/{app_id}/decision", response_model=ApplicationResponse)
+def record_decision(app_id: uuid.UUID, decision: ApplicationDecision, db: Annotated[Session, Depends(get_db)],
+                    current_user: Annotated[User, Depends(require_official)]):
+    """Official decision. The AI recommendation is advisory: overriding it, or any adverse decision,
+    requires a written reason that is stored in the audit ledger."""
+    app = get_application_for_user(db, app_id, current_user)
+    if app.status == ApplicationStatus.DRAFT or decision.status in (ApplicationStatus.DRAFT, ApplicationStatus.SUBMITTED):
+        raise HTTPException(status_code=409, detail="Invalid status transition")
+    notes = (decision.verdict_notes or "").strip()
+    ai_adverse = app.ai_recommendation in (AIRecommendation.DEFICIENCY, AIRecommendation.INSPECTION)
+    override = (decision.status == ApplicationStatus.APPROVED and ai_adverse) or (
+        decision.status in ADVERSE and app.ai_recommendation == AIRecommendation.FORWARD)
+    if (decision.status in ADVERSE or override) and len(notes) < 10:
+        raise HTTPException(status_code=422, detail="A written reason (at least 10 characters) is required for adverse "
+                                                    "decisions and for decisions that differ from the AI recommendation")
+    if decision.status in (ApplicationStatus.APPROVED, ApplicationStatus.REJECTED) and current_user.role == UserRole.EXPERT:
+        raise HTTPException(status_code=403, detail="Final approval or rejection requires a scrutiny officer or admin")
+    if decision.status == ApplicationStatus.APPROVED and any(
+            d.status in (DocumentStatus.PENDING, DocumentStatus.PROCESSING) for d in app.documents if d.is_current):
+        raise HTTPException(status_code=409, detail="Documents are still being processed")
+
+    old = app.status
+    app.status = decision.status
+    app.overall_verdict = notes or app.overall_verdict
+    app.decided_by, app.decided_at = current_user.id, datetime.now(timezone.utc)
     db.commit()
     db.refresh(app)
-
     audit_service.log_event(
-        db=db,
-        action="APPLICATION_STATUS_UPDATED",
-        user_id=current_user.id,
-        application_id=app.id,
-        details={
-            "old_status": old_status.value,
-            "new_status": app.status.value,
-            "notes": status_update.verdict_notes,
-        },
+        db=db, action="APPLICATION_DECISION", user_id=current_user.id, application_id=app.id,
+        details={"from": old.value, "to": app.status.value, "notes": notes,
+                 "ai_recommendation": app.ai_recommendation.value if app.ai_recommendation else None,
+                 "ai_risk_score": app.risk_score, "overrides_ai": override},
     )
     return app
+
+
+@router.post("/{app_id}/deficiency-notice", response_model=NotificationResponse, status_code=201)
+def issue_deficiency_notice(app_id: uuid.UUID, body: DeficiencyNoticeRequest, db: Annotated[Session, Depends(get_db)],
+                            current_user: Annotated[User, Depends(require_official)]):
+    """Official sends an evidence-linked deficiency notice; the institution can rectify item by item."""
+    app = get_application_for_user(db, app_id, current_user)
+    if app.status in (ApplicationStatus.DRAFT, ApplicationStatus.APPROVED, ApplicationStatus.REJECTED):
+        raise HTTPException(status_code=409, detail=f"Cannot issue a notice in status '{app.status.value}'")
+    old = app.status
+    app.status = ApplicationStatus.DEFICIENCY_FOUND
+    app.decided_by, app.decided_at = current_user.id, datetime.now(timezone.utc)
+    app.overall_verdict = body.notes
+    db.commit()
+    notice = notification_service.issue_deficiency_notice(db, app, current_user, body.notes, body.due_days, body.finding_ids)
+    audit_service.log_event(db=db, action="APPLICATION_DECISION", user_id=current_user.id, application_id=app.id,
+                            details={"from": old.value, "to": app.status.value, "notes": body.notes,
+                                     "notice_id": str(notice.id)})
+    return notice
