@@ -54,6 +54,9 @@ def test_portal_is_blind_to_analysis(client, zenith_app, zenith):
     assert client.post(f"/api/validation/trigger/{zenith_app['id']}", headers=zenith).status_code == 403
     listed = client.get("/api/applications", headers=zenith).json()
     assert listed and "risk_score" not in listed[0]
+    checklist = " ".join(c["description"] for c in view["checklist"]).lower()
+    for method in ("cross-institution", "geodata", "provider", "forensic", "graph"):
+        assert method not in checklist, method  # the checklist states norms, not detection methods
 
 
 def test_clean_application_is_green_apart_from_lab_evidence(client, apex_app, officer):
