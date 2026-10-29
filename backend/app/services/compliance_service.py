@@ -13,7 +13,7 @@ from app.schemas.compliance import ComplianceEvaluationResponse, ComplianceCheck
 from app.services import rule_engine
 from app.services.records_service import records_service
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 ALL_EXISTING = ["eoa", "change_intake", "closure", "other"]
 REF = "AICTE Approval Process Handbook 2026-27 — enter clause/appendix no."
 
@@ -133,7 +133,7 @@ DEFAULT_RULES: list[dict[str, Any]] = [
     },
     {
         "rule_code": "COMP-GEO-14", "title": "Mapped building footprint matches building plan (±15%)", "category": RuleCategory.INFRASTRUCTURE, "severity": Severity.CRITICAL,
-        "description": "Ground footprint from the geodata provider × floors within 15% of the plan's built-up area.",
+        "description": "Built-up area in the sanctioned plan consistent with the buildings on the campus (±15%).",
         "conditions": {"requires_doc": "campus_boundary",
                        "check": {"fact": "spatial.footprint_vs_plan_deviation_pct", "op": "<=", "value": 15, "label": "Footprint vs plan deviation (%)"},
                        "clause": "Built-up area claimed in the sanctioned plan should be consistent with the buildings existing on the campus.",
@@ -141,7 +141,7 @@ DEFAULT_RULES: list[dict[str, Any]] = [
     },
     {
         "rule_code": "COMP-ASSET-15", "title": "Equipment asset register", "category": RuleCategory.INFRASTRUCTURE, "severity": Severity.WARNING,
-        "description": "Register of laboratory equipment with serial numbers (used for cross-institution asset checks).",
+        "description": "Register of laboratory equipment with make, model and serial number of each item.",
         "conditions": {"requires_doc": "asset_register",
                        "check": {"fact": "docs.asset_register.equipment_count", "op": ">=", "value": 1, "unit": "count", "label": "Equipment listed"},
                        "clause": "Laboratory equipment as prescribed shall be available; the register lists each item with its serial number.",

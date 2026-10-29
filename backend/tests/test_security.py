@@ -23,6 +23,11 @@ def test_cors_allows_deployed_frontend_only(client):
     ok = preflight("https://validex-two.vercel.app")
     assert ok.status_code == 200 and ok.headers["access-control-allow-origin"] == "https://validex-two.vercel.app"
     assert preflight("https://evil.example.com").status_code == 400
+    # The portal registers its encryption key with PUT
+    put = client.options("/api/auth/public-key", headers={
+        "Origin": "https://validex-two.vercel.app", "Access-Control-Request-Method": "PUT",
+        "Access-Control-Request-Headers": "authorization,content-type"})
+    assert put.status_code == 200
 
 
 def test_self_registration_cannot_create_admin(client):
