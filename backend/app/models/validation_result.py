@@ -45,6 +45,11 @@ class ValidationResult(Base):
     confidence = Column(Float, default=1.0, nullable=False)
     rule_code = Column(String(64), nullable=True)
     rule_version = Column(Integer, nullable=True)
+    # Triage: green (auto-pass) / amber (clarification) / red (officer must confirm or override)
+    rag = Column(String(8), nullable=True, index=True)
+    actionable_by = Column(String(16), nullable=True)  # institution | officer | system
+    # Stable key so an officer's review survives re-screening while the finding is unchanged
+    fingerprint = Column(String(64), nullable=True, index=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     application = relationship("Application", back_populates="validation_results")

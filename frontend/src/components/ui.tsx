@@ -14,6 +14,8 @@ export const DOC_LABELS: Record<string, string> = {
   affidavit: 'Affidavit (e-Stamp)',
   building_plan: 'Building Plan',
   lab_photo: 'Lab Photos / Video',
+  asset_register: 'Asset / Equipment Register',
+  campus_boundary: 'Campus Boundary (GeoJSON)',
   other: 'Other',
 };
 
@@ -218,3 +220,18 @@ export const AdvisoryNote: React.FC = () => (
     inspection and the final decision rest with the competent AICTE authority.
   </p>
 );
+
+const RAG_META: Record<string, { tone: string; label: string }> = {
+  green: { tone: 'emerald', label: 'Green · auto-pass' },
+  amber: { tone: 'amber', label: 'Amber · clarification' },
+  red: { tone: 'rose', label: 'Red · officer review' },
+  not_applicable: { tone: 'slate', label: 'N/A' },
+};
+
+export const RagPill: React.FC<{ rag?: string | null; short?: boolean }> = ({ rag, short }) => {
+  const m = RAG_META[rag || 'not_applicable'] || RAG_META.not_applicable;
+  return <Pill tone={m.tone}>{short ? (rag || 'n/a').replace('_', ' ').toUpperCase() : m.label}</Pill>;
+};
+
+export const ragDot = (rag?: string | null) =>
+  rag === 'red' ? 'bg-rose-500' : rag === 'amber' ? 'bg-amber-400' : rag === 'green' ? 'bg-emerald-500' : 'bg-slate-300';

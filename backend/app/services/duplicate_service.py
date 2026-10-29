@@ -31,8 +31,11 @@ def find_duplicates(db: Session, doc: Document) -> list[dict[str, Any]]:
     id_field = SOURCES.get(doc.doc_type, {}).get("id_field")
     my_id = normalize_identifier((doc.extracted_data or {}).get(id_field)) if id_field else ""
 
+    mine = db.get(Application, doc.application_id)
     for other, app in others:
         same_app = other.application_id == doc.application_id
+        if not same_app and mine and app.institution_id == mine.institution_id:
+            continue  # an institution re-using its own file across its own applications (e.g. renewals) is legitimate
         info = {"document_id": str(other.id), "filename": other.original_filename, "application_id": str(app.id),
                 "application_number": app.application_number, "institution_name": app.institution_name,
                 "same_application": same_app}

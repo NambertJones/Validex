@@ -3,6 +3,7 @@
 from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.core import request_context
@@ -58,6 +59,30 @@ def login(form_data: Annotated[OAuth2PasswordRequestForm, Depends()], db: Annota
 @router.post("/login-json", response_model=Token)
 def login_json(credentials: UserLogin, db: Annotated[Session, Depends(get_db)]):
     return _login(db, credentials.email, credentials.password)
+
+
+class PublicKeyIn(BaseModel):
+    public_key_pem: str
+
+
+@router.put("/public-key")
+def set_public_key(body: PublicKeyIn, db: Annotated[Session, Depends(get_db)],
+                   current_user: Annotated[User, Depends(get_current_user)]):
+    """Institution registers the public half of its browser-held key pair (secure clarification inbox)."""
+    from app.services.secure_message import KeyError_, load_public_key
+    if current_user.role != UserRole.INSTITUTION:
+        raise HTTPException(status_code=403, detail="Only institutions hold an encrypted inbox")
+    try:
+        load_public_key(body.public_key_pem)
+    except KeyError_ as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    rotated = bool(current_user.public_key_pem) and current_user.public_key_pem != body.public_key_pem
+    current_user.public_key_pem = body.public_key_pem
+    db.commit()
+    import hashlib
+    audit_service.log_event(db=db, action="PUBLIC_KEY_ROTATED" if rotated else "PUBLIC_KEY_REGISTERED", user_id=current_user.id,
+                            details={"fingerprint": hashlib.sha256(body.public_key_pem.encode()).hexdigest()[:16]})
+    return {"registered": True, "rotated": rotated}
 
 
 @router.get("/me", response_model=UserResponse)

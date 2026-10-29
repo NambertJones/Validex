@@ -20,6 +20,7 @@ from app.schemas.validation import ValidationResultResponse
 from app.schemas.verification import VerificationResponse
 from app.services.audit_service import audit_service
 from app.services.document_service import document_service, evidence_object
+from app.schemas.portal import PortalDocument, portal_document
 
 router = APIRouter(prefix="/documents", tags=["Documents"])
 
@@ -34,7 +35,7 @@ async def _read_limited(file: UploadFile) -> bytes:
     return data
 
 
-@router.post("/upload", response_model=DocumentResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/upload", response_model=PortalDocument, status_code=status.HTTP_201_CREATED)
 async def upload_document(
     background_tasks: BackgroundTasks,
     application_id: Annotated[uuid.UUID, Form()],
@@ -43,8 +44,10 @@ async def upload_document(
     db: Annotated[Session, Depends(get_db)],
     doc_type: Annotated[DocumentType | None, Form()] = None,
 ):
-    """Institution uploads evidence (PDF/JPEG/PNG, or MP4 lab walkthrough). Processing runs asynchronously;
-    poll GET /documents/{id}/status for progress."""
+    """Institution uploads evidence (PDF/JPEG/PNG/GeoJSON, or MP4 lab walkthrough).
+
+    The response is deliberately static ("received"): analysis runs privately afterwards and its
+    results are visible only in the officers' console."""
     app = get_application_for_user(db, application_id, current_user)
     if app.status not in UPLOADABLE:
         raise HTTPException(status_code=409, detail="Documents can only be added while the application is a draft or under rectification")
@@ -52,10 +55,10 @@ async def upload_document(
     doc = document_service.create_document(db, app, data, file.filename or "upload", current_user.id, doc_type)
     document_service.schedule_processing(db, doc.id, current_user.id, background_tasks)
     db.refresh(doc)
-    return doc
+    return portal_document(doc)
 
 
-@router.post("/{doc_id}/replace", response_model=DocumentResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/{doc_id}/replace", response_model=PortalDocument, status_code=status.HTTP_201_CREATED)
 async def replace_document(
     doc_id: uuid.UUID,
     background_tasks: BackgroundTasks,
@@ -75,13 +78,15 @@ async def replace_document(
                                            old.doc_type, replaces=old)
     document_service.schedule_processing(db, doc.id, current_user.id, background_tasks)
     db.refresh(doc)
-    return doc
+    return portal_document(doc)
 
 
-@router.get("/{doc_id}", response_model=DocumentDetailResponse)
+@router.get("/{doc_id}", response_model=DocumentDetailResponse | PortalDocument)
 def get_document(doc_id: uuid.UUID, db: Annotated[Session, Depends(get_db)],
                  current_user: Annotated[User, Depends(get_current_user)]):
     doc = get_document_for_user(db, doc_id, current_user)
+    if not is_official(current_user):
+        return portal_document(doc)
     versions = (db.query(Document).filter(Document.application_id == doc.application_id, Document.doc_type == doc.doc_type)
                 .order_by(Document.uploaded_at).all())
     base = DocumentResponse.model_validate(doc).model_dump()
@@ -97,7 +102,8 @@ def get_document(doc_id: uuid.UUID, db: Annotated[Session, Depends(get_db)],
 
 @router.get("/{doc_id}/status")
 def get_processing_status(doc_id: uuid.UUID, db: Annotated[Session, Depends(get_db)],
-                          current_user: Annotated[User, Depends(get_current_user)]):
+                          current_user: Annotated[User, Depends(require_official)]):
+    """Officers only; institutions get no processing feedback."""
     doc = get_document_for_user(db, doc_id, current_user)
     return {"id": str(doc.id), "status": doc.status.value, "stage": doc.processing_stage,
             "progress": doc.processing_progress or 0, "doc_type": doc.doc_type.value}
@@ -161,9 +167,29 @@ def render_page(doc_id: uuid.UUID, page: int, db: Annotated[Session, Depends(get
     return Response(content=png, media_type="image/png", headers={"Cache-Control": "private, no-store"})
 
 
+@router.get("/{doc_id}/custody")
+def verify_custody(doc_id: uuid.UUID, db: Annotated[Session, Depends(get_db)],
+                   current_user: Annotated[User, Depends(require_official)]):
+    """Re-verify the chain of custody of the stored (watermarked) object."""
+    from app.services import custody_service
+    doc = get_document_for_user(db, doc_id, current_user)
+    if not doc.custody:
+        return {"intact": False, "checks": {}, "note": "Stored before chain-of-custody watermarking was introduced"}
+    try:
+        stored = storage.get_bytes(doc.storage_path)
+    except FileNotFoundError:
+        raise HTTPException(status_code=410, detail="File is no longer stored (retention period ended)")
+    result = custody_service.verify(stored, doc.custody.get("kind", ""), doc.custody)
+    result["matches_stored_hash_at_intake"] = result["stored_sha256"] == doc.custody.get("stored_sha256")
+    result["intact"] = result["intact"] and result["matches_stored_hash_at_intake"]
+    audit_service.log_event(db=db, action="CUSTODY_VERIFIED", user_id=current_user.id, application_id=doc.application_id,
+                            details={"document_id": str(doc.id), "intact": result["intact"]})
+    return result
+
+
 @router.get("/{doc_id}/evidence/{kind}")
 def get_evidence_image(doc_id: uuid.UUID, kind: str, db: Annotated[Session, Depends(get_db)],
-                       current_user: Annotated[User, Depends(get_current_user)]):
+                       current_user: Annotated[User, Depends(require_official)]):
     """Annotated evidence images: 'evidence' (tamper boxes), 'ela' (ELA heatmap), 'annotated' (CV detections)."""
     if kind not in ("evidence", "ela", "annotated"):
         raise HTTPException(status_code=404, detail="Unknown evidence kind")

@@ -109,7 +109,19 @@ def health_check():
     return {"status": "healthy", "app": settings.APP_NAME, "version": "2.1.0",
             "async_mode": "celery" if settings.USE_CELERY else "background-tasks",
             "authority_connector": "http" if settings.AUTHORITY_API_URL else "in-process-mock",
-            "engines": _engines()}
+            "engines": _engines(),
+            "graph": _graph_backend(), "geodata_provider": settings.GEODATA_PROVIDER,
+            "storage": "minio" if _storage_client() else "local-disk"}
+
+
+def _graph_backend() -> str:
+    from app.services.graph_service import graph_service
+    return graph_service.backend
+
+
+def _storage_client():
+    from app.core.storage import storage
+    return storage.client
 
 
 @app.get("/")

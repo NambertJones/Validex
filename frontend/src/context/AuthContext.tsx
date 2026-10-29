@@ -1,6 +1,10 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import type { User } from '../types';
 import { authApi } from '../api/client';
+import { ensureInbox } from '../lib/secureInbox';
+
+/** Set up the institution's encrypted inbox in the background; never blocks sign-in. */
+const withInbox = (u: User) => { ensureInbox(u).catch((e) => console.warn('Secure inbox setup failed', e)); return u; };
 
 interface AuthContextType {
   user: User | null;
@@ -24,7 +28,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (storedToken) {
         try {
           const profile = await authApi.getMe();
-          setUser(profile);
+          setUser(withInbox(profile));
         } catch {
           localStorage.removeItem('aicte_token');
           setToken(null);
@@ -41,7 +45,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     localStorage.setItem('aicte_token', data.access_token);
     setToken(data.access_token);
     const profile = await authApi.getMe();
-    setUser(profile);
+    setUser(withInbox(profile));
   };
 
   const logout = () => {

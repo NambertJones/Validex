@@ -29,6 +29,9 @@ class DocumentClassifier:
             "affidavit", "stamp paper", "non-judicial stamp", "notary public", "solemnly affirm",
             "deponent", "e-stamp", "before me",
         ],
+        DocumentType.ASSET_REGISTER: [
+            "asset register", "equipment register", "stock register", "serial no", "s/n:",
+        ],
         DocumentType.BUILDING_PLAN: [
             "building plan", "approved blueprint", "municipal corporation", "development authority",
             "floor area ratio", "carpet area", "architectural drawing", "sanctioned plan", "classroom",

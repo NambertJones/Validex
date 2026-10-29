@@ -48,7 +48,12 @@ class StorageManager:
             raise ValueError("Invalid object name")
         return path
 
+    def _require(self):
+        if settings.REQUIRE_MINIO and not self.client:
+            raise RuntimeError("MinIO is required (REQUIRE_MINIO=true) but not reachable")
+
     def upload_bytes(self, file_bytes: bytes, object_name: str, content_type: str = "application/octet-stream") -> str:
+        self._require()
         if self.client:
             try:
                 self._ensure_bucket()
@@ -61,6 +66,8 @@ class StorageManager:
                 )
                 return object_name
             except Exception as e:
+                if settings.REQUIRE_MINIO:
+                    raise
                 logger.warning(f"MinIO upload error: {e}, falling back to disk.")
 
         local_path = self._local_path(object_name)
@@ -71,6 +78,7 @@ class StorageManager:
 
     def get_bytes(self, object_name: str) -> bytes:
         """Return the stored bytes; raises FileNotFoundError when the object does not exist."""
+        self._require()
         if self.client:
             try:
                 response = self.client.get_object(self.bucket, object_name)
@@ -80,6 +88,8 @@ class StorageManager:
                     response.close()
                     response.release_conn()
             except Exception as e:
+                if settings.REQUIRE_MINIO:
+                    raise FileNotFoundError(object_name) from e
                 logger.warning(f"MinIO get error: {e}, falling back to disk.")
 
         local_path = self._local_path(object_name)

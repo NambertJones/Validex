@@ -9,6 +9,7 @@ from app.models.verification import Verification, VerificationMethod, Verificati
 from app.models.compliance_rule import ComplianceRule, RuleCategory
 from app.models.audit_log import AuditLog
 from app.models.notification import Notification, NotificationStatus
+from app.models.finding_review import FindingReview, ReviewDecision
 
 __all__ = [
     "Base",
@@ -32,4 +33,6 @@ __all__ = [
     "AuditLog",
     "Notification",
     "NotificationStatus",
+    "FindingReview",
+    "ReviewDecision",
 ]

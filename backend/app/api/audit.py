@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.dependencies import get_application_for_user, get_current_user, require_official
+from app.core.dependencies import get_application_for_user, require_official
 from app.models.audit_log import AuditLog
 from app.models.user import User
 from app.services.audit_service import audit_service
@@ -49,7 +49,7 @@ def verify_chain(db: Annotated[Session, Depends(get_db)], current_user: Annotate
 
 @router.get("/{app_id}")
 def get_application_audit_trail(app_id: uuid.UUID, db: Annotated[Session, Depends(get_db)],
-                                current_user: Annotated[User, Depends(get_current_user)]):
+                                current_user: Annotated[User, Depends(require_official)]):
     app = get_application_for_user(db, app_id, current_user)
     logs = audit_service.get_application_logs(db=db, application_id=app.id)
     users = _users(db, logs)

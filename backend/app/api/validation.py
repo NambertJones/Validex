@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.dependencies import get_application_for_user, get_current_user, is_official
+from app.core.dependencies import get_application_for_user, require_official
 from app.models.application import ApplicationStatus
 from app.models.user import User
 from app.models.validation_result import Severity, ValidationResult
@@ -23,17 +23,15 @@ DISCLAIMER = ("AI-generated findings are decision-support only. Forgery indicato
 
 @router.post("/trigger/{app_id}")
 def trigger_validation(app_id: uuid.UUID, db: Annotated[Session, Depends(get_db)],
-                       current_user: Annotated[User, Depends(get_current_user)]):
-    """Officials can re-run screening any time; institutions can self-check while drafting or rectifying."""
+                       current_user: Annotated[User, Depends(require_official)]):
+    """Officers only: screening results are never shown to institutions (blind portal)."""
     app = get_application_for_user(db, app_id, current_user)
-    if not is_official(current_user) and app.status not in (ApplicationStatus.DRAFT, ApplicationStatus.DEFICIENCY_FOUND):
-        raise HTTPException(status_code=409, detail="Self-check is available while drafting or rectifying")
     return {"message": "Pre-screening complete", "data": validation_service.validate_application(db, app.id, current_user.id)}
 
 
 @router.get("/report/{app_id}", response_model=ValidationReportResponse)
 def get_validation_report(app_id: uuid.UUID, db: Annotated[Session, Depends(get_db)],
-                          current_user: Annotated[User, Depends(get_current_user)]):
+                          current_user: Annotated[User, Depends(require_official)]):
     app = get_application_for_user(db, app_id, current_user)
     findings = sorted(
         db.query(ValidationResult).filter(ValidationResult.application_id == app.id).all(),
@@ -58,6 +56,6 @@ def get_validation_report(app_id: uuid.UUID, db: Annotated[Session, Depends(get_
 
 @router.get("/results/{app_id}", response_model=list[ValidationResultResponse])
 def get_validation_results(app_id: uuid.UUID, db: Annotated[Session, Depends(get_db)],
-                           current_user: Annotated[User, Depends(get_current_user)]):
+                           current_user: Annotated[User, Depends(require_official)]):
     app = get_application_for_user(db, app_id, current_user)
     return db.query(ValidationResult).filter(ValidationResult.application_id == app.id).all()

@@ -61,12 +61,19 @@ def make_certificate(title: str, subtitle: str, lines: list[str], qr: tuple[str,
     if table:
         y += 8
         col_w = (495) / len(table[0])
+        row_h = 18 if len(table) <= 20 else 13
+        size = 8.5 if len(table) <= 20 else 6.8
         for r, row in enumerate(table):
+            if y + row_h > (640 if page.number == 0 else 800):  # continue the table on a new page
+                page = doc.new_page(width=A4[0], height=A4[1])
+                page.insert_text((50, 50), title + " (continued)", fontsize=9, fontname="hebo", color=(0.1, 0.12, 0.4))
+                y = 62
             for c, cell in enumerate(row):
-                rect = fitz.Rect(50 + c * col_w, y, 50 + (c + 1) * col_w, y + 18)
+                rect = fitz.Rect(50 + c * col_w, y, 50 + (c + 1) * col_w, y + row_h)
                 page.draw_rect(rect, color=(0.6, 0.6, 0.6), width=0.5)
-                page.insert_text((rect.x0 + 4, rect.y1 - 5), cell, fontsize=8.5, fontname="hebo" if r == 0 else "helv")
-            y += 18
+                page.insert_text((rect.x0 + 3, rect.y1 - 3.5), cell, fontsize=size, fontname="hebo" if r == 0 else "helv")
+            y += row_h
+    page = doc[0]
 
     # Seal and signature
     page.draw_circle(fitz.Point(470, 700), 42, color=(0.2, 0.25, 0.65), width=2)

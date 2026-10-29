@@ -8,13 +8,17 @@ Crescent - mostly clean; university NOC is 'verification pending' at the source;
 """
 
 import glob
+import hashlib
+import json
 import os
+import sys
 
 from synthetic import (
     lab_placeholder, make_certificate, recompress_resize, tamper_whiteout,
 )
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(ROOT, "backend"))
 REAL_LAB_DIR = os.path.join(ROOT, "sample_docs", "lab_photos")
 
 APEX = "Apex Institute of Technology & Engineering"
@@ -61,16 +65,46 @@ def land_deed(owner, deed, acres, survey, reg_date):
     )
 
 
-def faculty_list(name, prof, assoc, asst):
-    rows = [["Name", "Designation", "Qualification", "Date of Joining"]]
+def faculty_roster(code: str, prof: int, assoc: int, asst: int) -> list[dict]:
+    """Synthetic faculty rows. PANs use the VXD prefix so they are recognisably fake."""
     designations = ["Professor"] * prof + ["Associate Professor"] * assoc + ["Assistant Professor"] * asst
-    for i, d in enumerate(designations[:22]):
-        rows.append([f"Faculty Member {i + 1:02d}", d, "Ph.D" if d != "Assistant Professor" else "M.Tech", f"0{1 + i % 9}/07/20{15 + i % 9}"])
+    rows = []
+    for i, d in enumerate(designations):
+        h = hashlib.sha256(f"{code}-{i}".encode()).hexdigest().upper()
+        letters = "".join(c for c in h if c.isalpha())[:3].ljust(3, "Q")
+        digits = "".join(c for c in h if c.isdigit())[:4].ljust(4, "7")
+        rows.append({"name": f"{code} Faculty {i + 1:02d}", "designation": d,
+                     "qualification": "Ph.D" if d != "Assistant Professor" else "M.Tech",
+                     "pan": f"VXD{letters[0]}{letters[1]}{digits}{letters[2]}",
+                     "faculty_id": f"FAC-{int(hashlib.sha256(code.encode()).hexdigest(), 16) % 90 + 10}{i + 1:04d}",
+                     "bio": f"BIO-{h[:8]}"})
+    return rows
+
+
+def faculty_list(name, roster: list[dict]):
+    prof = sum(1 for r in roster if r["designation"] == "Professor")
+    assoc = sum(1 for r in roster if r["designation"] == "Associate Professor")
+    asst = sum(1 for r in roster if r["designation"] == "Assistant Professor")
+    rows = [["Name", "Designation", "Qual.", "PAN", "AICTE Faculty ID", "Biometric ref."]]
+    rows += [[r["name"], r["designation"], r["qualification"], r["pan"], r["faculty_id"], r["bio"]] for r in roster]
     return make_certificate(
         f"{name.upper()} - APPROVED FACULTY LIST", "Regular teaching staff as on 01/07/2026",
         [f"Professor: {prof}", f"Associate Professor: {assoc}", f"Assistant Professor: {asst}"],
         table=rows, seal_text="PRINCIPAL",
     )
+
+
+def asset_register(name, items: list[tuple[str, str, str]]):
+    rows = [["Equipment", "Location", "Serial No."]] + [[d, loc, f"S/N: {sn}"] for d, loc, sn in items]
+    return make_certificate(
+        f"{name.upper()} - LABORATORY EQUIPMENT ASSET REGISTER", "Asset register as on 01/07/2026",
+        ["Equipment register of laboratories (make, model and serial number)."], table=rows, seal_text="STORES OFFICER",
+    )
+
+
+def campus_boundary(permanent_id: str) -> bytes:
+    from app.mock_authority.geodata import campus_geojson
+    return json.dumps(campus_geojson(permanent_id), indent=1).encode()
 
 
 def affidavit(name, stamp, deponent):
@@ -97,12 +131,14 @@ def university_noc(name, noc, issue, valid, valid_iso):
     )
 
 
-def building_plan(authority, approval, area, rooms):
+def building_plan(authority, approval, area, rooms, floors: int = 3, coverage: str = "4,625"):
+    """rooms: [(stated_sqm, length_m, width_m)]"""
     return make_certificate(
         authority, "Sanctioned Building Plan - Institutional",
         [f"Plan Approval No: {approval}", f"Approved by: Chief Architect Planner, {authority.title()}",
-         f"Total Built-up Area: {area} Sq M", "## ROOM-WISE CARPET AREA"] +
-        [f"Classroom C-{101 + i}: {a} sq m" for i, a in enumerate(rooms)],
+         f"Total Built-up Area: {area} Sq M", f"Floors: G+{floors}", f"Ground Coverage: {coverage} Sq M",
+         "## ROOM-WISE CARPET AREA"] +
+        [f"Classroom C-{101 + i}: {a:g} sq m ({l:g} m x {w:g} m)" for i, (a, l, w) in enumerate(rooms)],
         seal_text="ARCHITECT",
     )
 
@@ -119,6 +155,18 @@ def build() -> dict[str, dict]:
     apex_lab = real[0] if real else ("apex_lab_placeholder.jpg", lab_placeholder(1, "APEX"))
     crescent_lab = real[1] if len(real) > 1 else ("crescent_lab_placeholder.jpg", lab_placeholder(2, "CRESCENT"))
 
+    apex_roster = faculty_roster("APX", 8, 16, 48)        # 72 = 1440 students / 20
+    crescent_roster = faculty_roster("CRS", 6, 12, 30)    # 48 = 960 / 20
+    zenith_roster = faculty_roster("ZEN", 2, 3, 4)        # 9, required 60
+    # Collusion: two Zenith "faculty" are Apex staff (same PAN); one shares a biometric ID with a different Crescent PAN
+    zenith_roster[0] = {**apex_roster[4], "designation": zenith_roster[0]["designation"]}
+    zenith_roster[2] = {**apex_roster[9], "designation": zenith_roster[2]["designation"]}
+    zenith_roster[5] = {**zenith_roster[5], "bio": crescent_roster[3]["bio"]}
+    crescent_assets = [("Dell OptiPlex desktop", "Computer Lab 1", f"CRS-DT-{2001 + i}") for i in range(15)]
+    apex_assets = [("HP ProDesk desktop", "Computer Lab 1", f"APX-DT-{1001 + i}") for i in range(20)]
+    zenith_assets = ([crescent_assets[i] for i in range(2, 6)]                     # serials also in Crescent's register
+                     + [("Lenovo ThinkCentre desktop", "Lab 1", f"ZEN-DT-{3001 + i}") for i in range(6)])
+
     zenith_fire_genuine = fire_noc(ZENITH, "DFS/HQ/2022/NOC-44102", "16/03/2022", "15/03/2025", "2022-03-16", "2025-03-15", "Sector 62, Noida 201309")
     apex_audit = audit_report(APEX, "26054321BKAPEX1234", "054321", "R. Sharma & Associates")
 
@@ -130,10 +178,13 @@ def build() -> dict[str, dict]:
                 ("fire_safety", "fire_noc_2024.pdf", fire_noc(APEX, "DFS/HQ/2024/NOC-98421", "10/01/2024", "31/12/2027", "2024-01-10", "2027-12-31", "Knowledge Park III, Greater Noida 201310")),
                 ("audit_report", "audited_statement_2025_26.pdf", apex_audit),
                 ("land_document", "land_title_deed.pdf", land_deed("Apex Educational & Research Foundation Trust", "REG-DEED-2021-98124", 12.5, "142/1, 142/2", "14/08/2021")),
-                ("faculty_list", "faculty_list_2026_27.pdf", faculty_list(APEX, 4, 6, 12)),
+                ("faculty_list", "faculty_list_2026_27.pdf", faculty_list(APEX, apex_roster)),
                 ("affidavit", "affidavit_estamp.pdf", affidavit(APEX, "IN-UP98421054231801", "Dr. S. K. Ramanathan")),
                 ("noc", "aktu_noc_2026.pdf", university_noc(APEX, "AKTU/NOC/2026/1187", "01/06/2026", "31/05/2027", "2027-05-31")),
-                ("building_plan", "sanctioned_building_plan.pdf", building_plan("GREATER NOIDA DEVELOPMENT AUTHORITY", "GNIDA/BP/2019/3341", "18,500", [72, 70, 68, 75])),
+                ("building_plan", "sanctioned_building_plan.pdf", building_plan("GREATER NOIDA DEVELOPMENT AUTHORITY", "GNIDA/BP/2019/3341", "18,500",
+                                                                                [(72, 8, 9), (70, 7, 10), (68, 8.5, 8), (75, 7.5, 10)], floors=3, coverage="4,625")),
+                ("asset_register", "equipment_register.pdf", asset_register(APEX, apex_assets)),
+                ("campus_boundary", "campus_boundary.geojson", campus_boundary("1-2345678901")),
                 ("lab_photo", apex_lab[0], apex_lab[1]),
             ],
         },
@@ -144,10 +195,13 @@ def build() -> dict[str, dict]:
                 ("fire_safety", "fire_noc_renewed.pdf", tamper_whiteout(zenith_fire_genuine, "15/03/2025", "31/12/2027")),
                 # Copied from Apex with the client name changed: UDIN belongs to another institution
                 ("audit_report", "audit_report_2025_26.pdf", _swap_text(apex_audit, APEX, ZENITH)),
-                ("faculty_list", "faculty_list.pdf", faculty_list(ZENITH, 2, 3, 4)),
+                ("faculty_list", "faculty_list.pdf", faculty_list(ZENITH, zenith_roster)),
                 ("affidavit", "affidavit.pdf", affidavit(ZENITH, "IN-UP77120931188402", "Dr. R. Malhotra")),
                 ("noc", "university_noc.pdf", university_noc(ZENITH, "AKTU/NOC/2024/0932", "01/06/2024", "31/05/2025", "2025-05-31")),
-                ("building_plan", "building_plan.pdf", building_plan("NOIDA AUTHORITY", "NOIDA/BP/2018/2210", "9,800", [70, 58, 66])),
+                ("building_plan", "building_plan.pdf", building_plan("NOIDA AUTHORITY", "NOIDA/BP/2018/2210", "9,800",
+                                                                     [(70, 7, 9), (58, 7.25, 8), (66, 6, 11)], floors=2, coverage="3,400")),
+                ("asset_register", "asset_register.pdf", asset_register(ZENITH, zenith_assets)),
+                ("campus_boundary", "campus.geojson", campus_boundary("1-9876543210")),
                 ("lab_photo", "computer_lab_1.jpg", recompress_resize(crescent_lab[1], 0.85, 80)),
             ],
         },
@@ -158,10 +212,13 @@ def build() -> dict[str, dict]:
                 ("fire_safety", "fire_noc.pdf", fire_noc(CRESCENT, "DFS/HQ/2023/NOC-61177", "01/07/2023", "30/06/2028", "2023-07-01", "2028-06-30", "Techzone IV, Greater Noida 201318")),
                 ("audit_report", "audit_2025_26.pdf", audit_report(CRESCENT, "26112233CRESC56789", "112233", "Mehta Gupta & Co.")),
                 ("land_document", "land_deed.pdf", land_deed("Crescent Education Society", "REG-DEED-2019-55310", 10.2, "77/4", "02/05/2019")),
-                ("faculty_list", "faculty_list.pdf", faculty_list(CRESCENT, 3, 4, 7)),
+                ("faculty_list", "faculty_list.pdf", faculty_list(CRESCENT, crescent_roster)),
                 ("affidavit", "affidavit.pdf", affidavit(CRESCENT, "IN-UP55500011120003", "Dr. A. Fernandes")),
                 ("noc", "aktu_noc.pdf", university_noc(CRESCENT, "AKTU/NOC/2026/1290", "01/06/2026", "31/05/2027", "2027-05-31")),
-                ("building_plan", "building_plan.pdf", building_plan("GREATER NOIDA DEVELOPMENT AUTHORITY", "GNIDA/BP/2017/1120", "14,200", [68, 70, 66])),
+                ("building_plan", "building_plan.pdf", building_plan("GREATER NOIDA DEVELOPMENT AUTHORITY", "GNIDA/BP/2017/1120", "14,200",
+                                                                     [(68, 8.5, 8), (70, 7, 10), (66, 6, 11)], floors=3, coverage="3,600")),
+                ("asset_register", "asset_register.pdf", asset_register(CRESCENT, crescent_assets)),
+                ("campus_boundary", "campus_boundary.geojson", campus_boundary("1-5550001112")),
                 ("lab_photo", crescent_lab[0], crescent_lab[1]),
             ],
         },

@@ -24,8 +24,11 @@ class Notification(Base):
     sender_id = Column(Uuid, ForeignKey("users.id"), nullable=True)
     subject = Column(String(255), nullable=False)
     body = Column(String(4000), nullable=False)
-    # [{finding_id, document_id, doc_type, message, fix_hint, severity}]
+    # Non-sensitive metadata only: [{fingerprint, rule_code, doc_type}] (content is in encrypted_payload)
     items = Column(JSON, default=list, nullable=False)
+    # {alg, ek, iv, ct}: AES-256-GCM payload, key wrapped with the institution's RSA-OAEP public key
+    encrypted_payload = Column(JSON, nullable=True)
+    payload_sha256 = Column(String(64), nullable=True)
     channels = Column(JSON, default=list, nullable=False)  # ["in_app", "email"]
     status = Column(Enum(NotificationStatus), default=NotificationStatus.SENT, nullable=False)
     due_date = Column(DateTime(timezone=True), nullable=True)

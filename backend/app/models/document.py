@@ -18,6 +18,8 @@ class DocumentType(str, enum.Enum):
     AFFIDAVIT = "affidavit"
     BUILDING_PLAN = "building_plan"
     LAB_PHOTO = "lab_photo"
+    ASSET_REGISTER = "asset_register"      # equipment list with serial numbers
+    CAMPUS_BOUNDARY = "campus_boundary"    # GeoJSON polygon of the campus (and building footprints)
     OTHER = "other"
 
 
@@ -53,6 +55,8 @@ class Document(Base):
     uploaded_by = Column(Uuid, ForeignKey("users.id"), nullable=True)
     uploaded_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     files_purged_at = Column(DateTime(timezone=True), nullable=True)
+    # Signed chain-of-custody manifest (original SHA-256/size, receive time, watermark) + stored-object hash
+    custody = Column(JSON, nullable=True)
 
     application = relationship("Application", back_populates="documents")
     validation_results = relationship("ValidationResult", back_populates="document", cascade="all, delete-orphan")

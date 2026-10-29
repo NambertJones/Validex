@@ -1,9 +1,11 @@
 """Document intake and the processing pipeline.
 
-Intake validates and stores the file (never trusting the client's filename or MIME type).
-Processing runs in stages and records progress so the UI can show a live progress bar:
+Intake validates the file (never trusting the client's filename or MIME type), stamps it with the
+chain-of-custody watermark and only then stores it. Processing recovers the original bytes from the
+stored object, checks them against the custody hash, and runs:
     OCR -> classify -> extract fields -> locate fields -> forensics -> duplicates -> source verification
-Lab photos / walkthrough videos go to the computer-vision stage instead.
+Lab photos / videos go to computer vision, campus boundaries to spatial verification, and faculty
+lists / asset registers also feed the collusion graph. Stages are recorded for officers only.
 Processing runs on a Celery worker when USE_CELERY is set, otherwise as a background task.
 """
 
@@ -30,6 +32,7 @@ from app.ml.infrastructure_cv import infrastructure_cv
 from app.ml.ocr_engine import ocr_engine
 from app.models.application import Application
 from app.models.document import Document, DocumentStatus, DocumentType
+from app.services import custody_service
 from app.services.audit_service import audit_service
 
 logger = logging.getLogger(__name__)
@@ -39,6 +42,7 @@ ALLOWED = {
     "jpeg": ("image/jpeg", lambda b: b[:3] == b"\xff\xd8\xff"),
     "png": ("image/png", lambda b: b[:8] == b"\x89PNG\r\n\x1a\n"),
     "mp4": ("video/mp4", lambda b: b[4:8] == b"ftyp"),
+    "geojson": ("application/geo+json", lambda b: b.lstrip()[:1] == b"{" and b'"type"' in b[:4096]),
 }
 CV_TYPES = {DocumentType.LAB_PHOTO}
 ID_FIELDS = ("certificate_number", "udin", "deed_number", "noc_number", "stamp_certificate_no", "approval_number")
@@ -48,7 +52,11 @@ def sniff(file_bytes: bytes) -> tuple[str, str]:
     for kind, (mime, test) in ALLOWED.items():
         if test(file_bytes):
             return kind, mime
-    raise HTTPException(status_code=415, detail="Unsupported file type. Upload PDF, JPEG, PNG or MP4.")
+    raise HTTPException(status_code=415, detail="Unsupported file type. Upload PDF, JPEG, PNG, MP4 or GeoJSON.")
+
+
+class CustodyBreach(RuntimeError):
+    pass
 
 
 def safe_filename(name: str) -> str:
@@ -81,14 +89,26 @@ class DocumentService:
         if kind == "mp4":
             doc_type = DocumentType.LAB_PHOTO
 
+        if kind == "geojson":
+            doc_type = DocumentType.CAMPUS_BOUNDARY
+
         doc_id = uuid.uuid4()
+        received_at = datetime.now(timezone.utc)
+        manifest = custody_service.build_manifest(file_bytes, kind, doc_id, app.id, user_id, received_at)
+        try:
+            stored, stored_mime = custody_service.apply(file_bytes, kind, manifest)
+        except custody_service.CustodyError as e:
+            raise HTTPException(status_code=422, detail=str(e))
         storage_path = f"applications/{app.id}/{doc_id}"
-        storage.upload_bytes(file_bytes, storage_path, mime)
+        # Only the watermarked object is ever written to storage
+        storage.upload_bytes(stored, storage_path, stored_mime)
         doc = Document(
             id=doc_id, application_id=app.id, doc_type=doc_type or (replaces.doc_type if replaces else DocumentType.OTHER),
-            original_filename=filename, storage_path=storage_path, file_size=len(file_bytes), mime_type=mime,
-            content_hash=hashlib.sha256(file_bytes).hexdigest(), status=DocumentStatus.PENDING,
+            original_filename=filename, storage_path=storage_path, file_size=len(file_bytes), mime_type=stored_mime,
+            content_hash=manifest["original_sha256"], status=DocumentStatus.PENDING,
             extracted_data={"classification": {"source": "manual" if doc_type else "pending"}},
+            custody={**manifest, "stored_sha256": hashlib.sha256(stored).hexdigest(), "stored_size": len(stored),
+                     "original_mime": mime},
             processing_stage="queued", processing_progress=0, uploaded_by=user_id, is_current=True,
         )
         db.add(doc)
@@ -100,10 +120,24 @@ class DocumentService:
         audit_service.log_event(
             db=db, action="DOCUMENT_REPLACED" if replaces else "DOCUMENT_UPLOADED", user_id=user_id, application_id=app.id,
             details={"document_id": str(doc.id), "filename": filename, "sha256": doc.content_hash, "size": doc.file_size,
+                     "stored_sha256": doc.custody["stored_sha256"], "watermark": manifest["watermark"],
                      "declared_type": doc_type.value if doc_type else None,
                      "replaces": str(replaces.id) if replaces else None},
         )
         return doc
+
+    @staticmethod
+    def original_bytes(doc: Document) -> bytes:
+        """The bytes exactly as the institution submitted them, recovered from the watermarked object.
+
+        Raises CustodyBreach if the stored object no longer yields the original recorded at intake."""
+        stored = storage.get_bytes(doc.storage_path)
+        if not doc.custody:  # legacy document stored before watermarking
+            return stored
+        original, embedded = custody_service.extract(stored, doc.custody.get("kind", ""))
+        if original is None or hashlib.sha256(original).hexdigest() != doc.content_hash:
+            raise CustodyBreach(f"Stored object for {doc.id} does not yield the original recorded at intake")
+        return original
 
     @staticmethod
     def _stage(db: Session, doc: Document, stage: str, progress: int) -> None:
@@ -116,12 +150,25 @@ class DocumentService:
             raise ValueError("Document not found")
         started = datetime.now(timezone.utc)
         try:
-            file_bytes = storage.get_bytes(doc.storage_path)
+            try:
+                file_bytes = self.original_bytes(doc)
+            except CustodyBreach as e:
+                doc.status = DocumentStatus.FAILED
+                doc.processing_stage = "custody_breach"
+                db.commit()
+                audit_service.log_event(db=db, action="CUSTODY_BREACH", application_id=doc.application_id,
+                                        details={"document_id": str(doc.id), "error": str(e)})
+                return doc
             doc.status = DocumentStatus.PROCESSING
             if doc.doc_type in CV_TYPES:
                 self._process_visual_evidence(db, doc, file_bytes)
+            elif doc.doc_type == DocumentType.CAMPUS_BOUNDARY:
+                self._process_boundary(db, doc, file_bytes)
             else:
                 self._process_document_file(db, doc, file_bytes)
+            if doc.doc_type in (DocumentType.FACULTY_LIST, DocumentType.ASSET_REGISTER):
+                from app.services.graph_service import graph_service
+                graph_service.ingest_document(db, doc)
             self._stage(db, doc, "duplicates", 85)
             from app.services.duplicate_service import find_duplicates
             data = dict(doc.extracted_data or {})
@@ -130,7 +177,7 @@ class DocumentService:
             db.commit()
 
             from app.services.verification_service import verification_service
-            if doc.doc_type not in CV_TYPES:
+            if doc.doc_type not in CV_TYPES and doc.doc_type != DocumentType.CAMPUS_BOUNDARY:
                 self._stage(db, doc, "source_verification", 92)
                 verification_service.verify_document(db, doc.id, user_id=user_id, file_bytes=file_bytes)
 
@@ -173,6 +220,9 @@ class DocumentService:
 
         self._stage(db, doc, "extraction", 50)
         fields = data_extractor.extract_fields(ocr.text, doc.doc_type)
+        from app.services.graph_service import pseudonymise_faculty, scrub_text
+        if fields.get("faculty_members"):
+            fields["faculty_members"] = pseudonymise_faculty(fields["faculty_members"])
         if ocr.engine != "pdf-native":
             from app.services.matching import ocr_fix_identifier
             for key in ID_FIELDS:
@@ -185,7 +235,7 @@ class DocumentService:
             "classification": classification,
             "ocr": {"engine": ocr.engine, "confidence": ocr.confidence, "page_count": ocr.page_count},
             "ocr_confidence": ocr.confidence,
-            "raw_text_snippet": ocr.text[:1500],
+            "raw_text_snippet": scrub_text(ocr.text[:1500]),
             "field_locations": self._locate_fields(file_bytes, is_pdf, fields, ocr.words),
         }
         doc.page_count = max(ocr.page_count, 1)
@@ -200,6 +250,15 @@ class DocumentService:
         data["has_evidence_image"] = _save_data_uri(evidence_object(doc, "evidence"), report.evidence_image)
         data["has_ela_heatmap"] = _save_data_uri(evidence_object(doc, "ela"), report.heatmap)
         doc.extracted_data = data
+        db.commit()
+
+    def _process_boundary(self, db: Session, doc: Document, file_bytes: bytes) -> None:
+        from app.services.spatial_service import spatial_service
+
+        self._stage(db, doc, "spatial_verification", 40)
+        app = db.query(Application).filter(Application.id == doc.application_id).first()
+        doc.extracted_data = {"classification": {"source": "manual", "detected": "campus_boundary"},
+                              "spatial": spatial_service.analyze_boundary(db, app, file_bytes)}
         db.commit()
 
     def _process_visual_evidence(self, db: Session, doc: Document, file_bytes: bytes) -> None:

@@ -1,22 +1,30 @@
 import React, { useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { Search, ArrowRight } from 'lucide-react';
-import { applicationsApi } from '../api/client';
-import type { Application } from '../types';
-import { AIPill, Empty, Spinner, StatusPill, fmtDay } from '../components/ui';
+import { applicationsApi, triageApi } from '../api/client';
+import type { Application, TriageQueueItem } from '../types';
+import { AIPill, Empty, Pill, Spinner, StatusPill, fmtDay } from '../components/ui';
 
 const riskTone = (r: number) => (r >= 60 ? 'text-rose-600' : r >= 25 ? 'text-amber-600' : 'text-emerald-600');
 
 export const ApplicationsPage: React.FC = () => {
   const [params, setParams] = useSearchParams();
   const [apps, setApps] = useState<Application[]>([]);
+  const [rag, setRag] = useState<Record<string, TriageQueueItem>>({});
   const [loading, setLoading] = useState(true);
   const search = params.get('search') || '';
   const status = params.get('status') || '';
 
   useEffect(() => {
     setLoading(true);
-    applicationsApi.list({ search: search || undefined, status: status || undefined }).then(setApps).finally(() => setLoading(false));
+    Promise.all([applicationsApi.list({ search: search || undefined, status: status || undefined }), triageApi.queue()])
+      .then(([list, queue]) => {
+        const byId = Object.fromEntries(queue.map((q) => [q.application.id, q]));
+        // Unreviewed red items first, then risk
+        setApps([...list].sort((a, b) => (byId[b.id]?.red_unreviewed || 0) - (byId[a.id]?.red_unreviewed || 0) || b.risk_score - a.risk_score));
+        setRag(byId);
+      })
+      .finally(() => setLoading(false));
   }, [search, status]);
 
   const set = (k: string, v: string) => {
@@ -28,8 +36,8 @@ export const ApplicationsPage: React.FC = () => {
   return (
     <div className="space-y-5">
       <div>
-        <h1 className="text-2xl font-bold tracking-tight text-slate-900">Review Queue</h1>
-        <p className="text-sm text-slate-500 mt-0.5">Submitted applications ordered by AI risk score. Recommendations are advisory.</p>
+        <h1 className="text-2xl font-bold tracking-tight text-slate-900">Triage Queue</h1>
+        <p className="text-sm text-slate-500 mt-0.5">Officers only. Ordered by unreviewed red items, then risk. Green passes automatically; amber goes back to the institution as an encrypted clarification request; red needs your confirmation or override.</p>
       </div>
 
       <div className="flex flex-wrap gap-3">
@@ -59,6 +67,7 @@ export const ApplicationsPage: React.FC = () => {
                 <th className="text-left px-4 py-3">Application</th>
                 <th className="text-left px-4 py-3">Institution</th>
                 <th className="text-left px-4 py-3">Status</th>
+                <th className="text-left px-4 py-3">Red · amber</th>
                 <th className="text-left px-4 py-3">AI advisory</th>
                 <th className="text-right px-4 py-3">Risk</th>
                 <th className="px-4 py-3" />
@@ -73,6 +82,14 @@ export const ApplicationsPage: React.FC = () => {
                   </td>
                   <td className="px-4 py-3 text-xs font-medium text-slate-800">{a.institution_name}</td>
                   <td className="px-4 py-3"><StatusPill status={a.status} /></td>
+                  <td className="px-4 py-3 text-xs">
+                    {rag[a.id] ? (
+                      <span className="flex gap-1.5">
+                        <Pill tone={rag[a.id].red_unreviewed ? 'rose' : 'slate'} title="Unreviewed / total red">{rag[a.id].red_unreviewed}/{rag[a.id].red} red</Pill>
+                        <Pill tone={rag[a.id].amber ? 'amber' : 'slate'}>{rag[a.id].amber} amber</Pill>
+                      </span>
+                    ) : '—'}
+                  </td>
                   <td className="px-4 py-3"><AIPill rec={a.ai_recommendation} /></td>
                   <td className={`px-4 py-3 text-right font-mono font-bold ${riskTone(a.risk_score)}`}>{a.risk_score}</td>
                   <td className="px-4 py-3 text-right">

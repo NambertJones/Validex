@@ -26,6 +26,9 @@ class User(Base):
     role = Column(Enum(UserRole), default=UserRole.INSTITUTION, nullable=False)
     institution_name = Column(String(255), nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
+    # Institution's RSA-OAEP public key (SPKI PEM) for encrypted clarification requests;
+    # the private key never leaves the institution's browser
+    public_key_pem = Column(String(1200), nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at = Column(
         DateTime(timezone=True),

@@ -12,6 +12,7 @@ import { AuditPage } from './pages/AuditPage';
 import { AdminPage } from './pages/AdminPage';
 import { InstitutionHomePage } from './pages/InstitutionHomePage';
 import { NoticesPage } from './pages/NoticesPage';
+import { PortalApplicationPage } from './pages/PortalApplicationPage';
 import type { UserRole } from './types';
 
 const Protected: React.FC<{ children: React.ReactNode; roles?: UserRole[] }> = ({ children, roles }) => {
@@ -31,6 +32,12 @@ const Home: React.FC = () => {
 
 const OFFICIALS: UserRole[] = ['admin', 'scrutiny', 'expert'];
 
+/** Institutions get the blind portal view; officers get the triage console. */
+const ApplicationRoute: React.FC = () => {
+  const { user } = useAuth();
+  return user?.role === 'institution' ? <PortalApplicationPage /> : <ApplicationDetailPage />;
+};
+
 export const App: React.FC = () => (
   <AuthProvider>
     <BrowserRouter>
@@ -39,7 +46,7 @@ export const App: React.FC = () => (
         <Route path="/" element={<Protected><DashboardLayout /></Protected>}>
           <Route index element={<Home />} />
           <Route path="applications" element={<Protected roles={OFFICIALS}><ApplicationsPage /></Protected>} />
-          <Route path="applications/:id" element={<ApplicationDetailPage />} />
+          <Route path="applications/:id" element={<ApplicationRoute />} />
           <Route path="notices" element={<Protected roles={['institution']}><NoticesPage /></Protected>} />
           <Route path="compliance" element={<CompliancePage />} />
           <Route path="infrastructure" element={<Protected roles={OFFICIALS}><InfrastructurePage /></Protected>} />

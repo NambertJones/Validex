@@ -49,13 +49,17 @@ class ComplianceCheckItem(BaseModel):
     rule_code: str
     title: str
     category: RuleCategory
-    status: str  # "compliant" | "non_compliant" | "warning" | "not_applicable"
+    rag: str  # "green" | "amber" | "red" | "not_applicable"
+    status: str  # legacy: "compliant" | "non_compliant" | "warning" | "not_applicable"
     message: str
     evidence: str | None = None
     rule_version: int | None = None
     expected: str | None = None
     actual: str | None = None
     fix_hint: str | None = None
+    clause: str | None = None
+    handbook_reference: str | None = None
+    trace: list[str] = []
 
 
 class ComplianceEvaluationResponse(BaseModel):
@@ -63,5 +67,6 @@ class ComplianceEvaluationResponse(BaseModel):
     total_rules_evaluated: int
     compliant_count: int
     deficiency_count: int
+    amber_count: int = 0
     compliance_score: float  # Percentage 0-100%
     results: list[ComplianceCheckItem]

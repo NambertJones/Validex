@@ -112,10 +112,17 @@
       "state": "Uttar Pradesh",
       "pincode": "201310",
       "approved_intake": 360,
-      "faculty_on_record": 22,
+      "faculty_on_record": 72,
       "land_area_acres": 12.5,
-      "ter_payment": {"2026-2027": "paid"},
-      "previous_eoa": [{"year": "2025-2026", "status": "approved"}],
+      "ter_payment": {
+        "2026-2027": "paid"
+      },
+      "previous_eoa": [
+        {
+          "year": "2025-2026",
+          "status": "approved"
+        }
+      ],
       "open_deficiencies": []
     },
     "1-9876543210": {
@@ -126,9 +133,18 @@
       "approved_intake": 300,
       "faculty_on_record": 11,
       "land_area_acres": 8.0,
-      "ter_payment": {"2026-2027": "unpaid"},
-      "previous_eoa": [{"year": "2025-2026", "status": "approved_with_conditions"}],
-      "open_deficiencies": ["Fire NOC renewal pending (2025-26 Expert Visit Committee report)"]
+      "ter_payment": {
+        "2026-2027": "unpaid"
+      },
+      "previous_eoa": [
+        {
+          "year": "2025-2026",
+          "status": "approved_with_conditions"
+        }
+      ],
+      "open_deficiencies": [
+        "Fire NOC renewal pending (2025-26 Expert Visit Committee report)"
+      ]
     },
     "1-5550001112": {
       "name": "Crescent Institute of Technology",
@@ -136,10 +152,17 @@
       "state": "Uttar Pradesh",
       "pincode": "201318",
       "approved_intake": 240,
-      "faculty_on_record": 14,
+      "faculty_on_record": 48,
       "land_area_acres": 10.2,
-      "ter_payment": {"2026-2027": "paid"},
-      "previous_eoa": [{"year": "2025-2026", "status": "approved"}],
+      "ter_payment": {
+        "2026-2027": "paid"
+      },
+      "previous_eoa": [
+        {
+          "year": "2025-2026",
+          "status": "approved"
+        }
+      ],
       "open_deficiencies": []
     }
   }
