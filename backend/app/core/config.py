@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     MINIO_BUCKET: str = "aicte-documents"
     MINIO_SECURE: bool = False
     USE_MINIO: bool = True
+    # Serve and store files strictly via MinIO (no local-disk fallback)
+    REQUIRE_MINIO: bool = False
 
     # JWT Auth
     SECRET_KEY: str = DEFAULT_SECRET
@@ -47,6 +49,8 @@ class Settings(BaseSettings):
 
     # Uploads
     MAX_UPLOAD_MB: int = 25
+    # Chain-of-custody watermark stamped on every stored file (the UTC receive time is appended)
+    WATERMARK_TEXT: str = "VALIDEX - CHAIN OF CUSTODY - VERIFIED"
 
     # Issuing-authority connector. Empty = in-process mock adapter; otherwise base URL
     # of the mock authority service (or a real sandbox gateway).
@@ -54,6 +58,15 @@ class Settings(BaseSettings):
     AUTHORITY_TIMEOUT_SECONDS: float = 5.0
     # Simulate an outage of the issuing-authority source (demo of "source unavailable" + retry)
     MOCK_AUTHORITY_OUTAGE: bool = False
+
+    # Geodata provider for observed building footprints: "simulated" (demo) or "osm" (Overpass API)
+    GEODATA_PROVIDER: str = "simulated"
+    OVERPASS_URL: str = "https://overpass-api.de/api/interpreter"
+
+    # Collusion graph: Neo4j when set, otherwise an in-process graph built from PostgreSQL
+    NEO4J_URI: str = ""
+    NEO4J_USER: str = "neo4j"
+    NEO4J_PASSWORD: str = ""
 
     # Data protection
     RETENTION_DAYS: int = 365

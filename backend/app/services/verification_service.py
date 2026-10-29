@@ -85,9 +85,10 @@ class VerificationService:
             raise ValueError("Document not found")
         results: list[Verification] = []
         if file_bytes is None:
+            from app.services.document_service import CustodyBreach, document_service
             try:
-                file_bytes = storage.get_bytes(doc.storage_path)
-            except FileNotFoundError:
+                file_bytes = document_service.original_bytes(doc)
+            except (FileNotFoundError, CustodyBreach):
                 file_bytes = None
 
         qr_identifier = None

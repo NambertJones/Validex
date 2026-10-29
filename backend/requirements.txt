@@ -35,3 +35,4 @@ onnxruntime>=1.17         # YOLOv8n object detection without PyTorch (app/ml/wei
 
 # Testing
 pytest>=8.0
+neo4j>=5.20               # collusion graph (used when NEO4J_URI is set)

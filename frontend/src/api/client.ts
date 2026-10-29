@@ -17,6 +17,12 @@ import type {
   Verification,
   InfraReport,
   ChecklistItem,
+  PortalApplication,
+  PortalDocument,
+  TriageBundle,
+  TriageQueueItem,
+  CustodyReport,
+  GraphView,
 } from '../types';
 
 const api = axios.create({ baseURL: import.meta.env.VITE_API_URL || '/api' });
@@ -57,6 +63,7 @@ export const authApi = {
   register: async (data: { email: string; password: string; full_name: string; institution_name?: string }) =>
     (await api.post('/auth/register', data)).data,
   getMe: async (): Promise<User> => (await api.get('/auth/me')).data,
+  setPublicKey: async (public_key_pem: string) => (await api.put('/auth/public-key', { public_key_pem })).data,
 };
 
 export const applicationsApi = {
@@ -70,26 +77,42 @@ export const applicationsApi = {
   submit: async (id: string): Promise<Application> => (await api.post(`/applications/${id}/submit`)).data,
   decide: async (id: string, status: string, verdict_notes?: string): Promise<Application> =>
     (await api.post(`/applications/${id}/decision`, { status, verdict_notes })).data,
-  deficiencyNotice: async (id: string, notes: string, due_days: number, finding_ids?: string[]): Promise<NotificationItem> =>
-    (await api.post(`/applications/${id}/deficiency-notice`, { notes, due_days, finding_ids })).data,
+  clarificationRequest: async (id: string, notes: string, due_days: number, finding_ids?: string[]): Promise<NotificationItem> =>
+    (await api.post(`/applications/${id}/clarification-request`, { notes, due_days, finding_ids })).data,
+};
+
+/** Institution portal: the same endpoints answer institutions with blind views. */
+export const portalApi = {
+  list: async (): Promise<PortalApplication[]> => (await api.get('/applications')).data,
+  get: async (id: string): Promise<PortalApplication> => (await api.get(`/applications/${id}`)).data,
+  create: async (data: { category: string; academic_year: string; permanent_id?: string; requested_intake?: number }): Promise<PortalApplication> =>
+    (await api.post('/applications', data)).data,
+  submit: async (id: string): Promise<PortalApplication> => (await api.post(`/applications/${id}/submit`)).data,
+};
+
+export const triageApi = {
+  queue: async (): Promise<TriageQueueItem[]> => (await api.get('/triage/queue')).data,
+  bundle: async (id: string): Promise<TriageBundle> => (await api.get(`/triage/${id}`)).data,
+  review: async (appId: string, findingId: string, decision: 'confirmed' | 'overridden', reason: string) =>
+    (await api.post(`/triage/${appId}/findings/${findingId}/review`, { decision, reason })).data,
+  graph: async (id: string): Promise<GraphView> => (await api.get(`/triage/${id}/graph`)).data,
 };
 
 export const documentsApi = {
-  upload: async (applicationId: string, file: File, docType?: string): Promise<DocumentItem> => {
+  upload: async (applicationId: string, file: File, docType?: string): Promise<PortalDocument> => {
     const fd = new FormData();
     fd.append('application_id', applicationId);
     fd.append('file', file);
     if (docType) fd.append('doc_type', docType);
     return (await api.post('/documents/upload', fd)).data;
   },
-  replace: async (docId: string, file: File): Promise<DocumentItem> => {
+  replace: async (docId: string, file: File): Promise<PortalDocument> => {
     const fd = new FormData();
     fd.append('file', file);
     return (await api.post(`/documents/${docId}/replace`, fd)).data;
   },
   get: async (id: string): Promise<DocumentDetail> => (await api.get(`/documents/${id}`)).data,
-  status: async (id: string): Promise<{ id: string; status: string; stage: string; progress: number }> =>
-    (await api.get(`/documents/${id}/status`)).data,
+  custody: async (id: string): Promise<CustodyReport> => (await api.get(`/documents/${id}/custody`)).data,
   reprocess: async (id: string): Promise<DocumentItem> => (await api.post(`/documents/${id}/reprocess`)).data,
   pageUrl: (id: string, page = 0) => `/documents/${id}/page/${page}`,
   evidenceUrl: (id: string, kind: 'evidence' | 'ela' | 'annotated') => `/documents/${id}/evidence/${kind}`,

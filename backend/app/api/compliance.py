@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.dependencies import get_application_for_user, get_current_user, require_admin
+from app.core.dependencies import get_application_for_user, get_current_user, require_admin, require_official
 from app.models.application import ApplicationCategory
 from app.models.audit_log import AuditLog
 from app.models.compliance_rule import ComplianceRule
@@ -17,11 +17,12 @@ from app.schemas.compliance import (
 )
 from app.services.audit_service import audit_service
 from app.services.compliance_service import compliance_service
-from app.services.rule_engine import OPS
+from app.services.rule_engine import OPS, RuleError, validate_expr
 
 router = APIRouter(prefix="/compliance", tags=["Compliance Rules Engine"])
 
-FACT_PREFIXES = ("app.", "docs.", "records.", "infra.", "computed.")
+FACT_PREFIXES = ("app.", "docs.", "records.", "infra.", "computed.", "spatial.")
+UNITS = {None, "acres", "hectares", "sqm", "sqft", "count", "ratio"}
 
 
 def validate_conditions(conditions: dict[str, Any], applies_to: list[str] | None) -> None:
@@ -31,19 +32,32 @@ def validate_conditions(conditions: dict[str, Any], applies_to: list[str] | None
         raise HTTPException(status_code=422, detail=f"Unknown document type '{req}'")
     check = conditions.get("check")
     if check is not None:
-        if not isinstance(check, dict) or "fact" not in check or "op" not in check:
-            raise HTTPException(status_code=422, detail="'check' must contain 'fact' and 'op'")
-        if not str(check["fact"]).startswith(FACT_PREFIXES):
+        if not isinstance(check, dict) or "op" not in check or not ("fact" in check or "expr" in check):
+            raise HTTPException(status_code=422, detail="'check' must contain 'op' and a 'fact' or 'expr'")
+        if "fact" in check and not str(check["fact"]).startswith(FACT_PREFIXES):
             raise HTTPException(status_code=422, detail=f"Fact must start with one of {FACT_PREFIXES}")
         if check["op"] not in OPS:
             raise HTTPException(status_code=422, detail=f"Operator must be one of {sorted(OPS)}")
+        if check.get("unit") not in UNITS:
+            raise HTTPException(status_code=422, detail=f"Unit must be one of {sorted(u for u in UNITS if u)}")
         value = check.get("value")
-        if isinstance(value, dict) and not str(value.get("fact", "")).startswith(FACT_PREFIXES):
+        try:
+            if "expr" in check:
+                validate_expr(check["expr"])
+            if isinstance(value, dict) and "expr" in value:
+                validate_expr(value["expr"])
+        except (RuleError, SyntaxError) as e:
+            raise HTTPException(status_code=422, detail=f"Invalid expression: {e}")
+        if isinstance(value, dict) and "fact" in value and not str(value["fact"]).startswith(FACT_PREFIXES):
             raise HTTPException(status_code=422, detail="Fact reference in 'value' is invalid")
+        if check["op"] == "between" and not (isinstance(value, list) and len(value) == 2):
+            raise HTTPException(status_code=422, detail="'between' needs value [min, max]")
     if req is None and check is None:
         raise HTTPException(status_code=422, detail="A rule needs 'requires_doc' and/or 'check'")
-    if conditions.get("on_missing_fact", "manual_review") not in ("manual_review", "fail", "skip"):
-        raise HTTPException(status_code=422, detail="on_missing_fact must be manual_review, fail or skip")
+    if conditions.get("on_missing_fact", "amber") not in ("amber", "red", "skip"):
+        raise HTTPException(status_code=422, detail="on_missing_fact must be amber, red or skip")
+    if conditions.get("fail_rag", "red") not in ("red", "amber"):
+        raise HTTPException(status_code=422, detail="fail_rag must be red or amber")
     valid_categories = {c.value for c in ApplicationCategory}
     for cat in applies_to or []:
         if cat not in valid_categories:
@@ -109,7 +123,7 @@ def rule_history(rule_id: uuid.UUID, db: Annotated[Session, Depends(get_db)], cu
 
 @router.get("/check/{app_id}", response_model=ComplianceEvaluationResponse)
 def evaluate_application_compliance(app_id: uuid.UUID, db: Annotated[Session, Depends(get_db)],
-                                    current_user: Annotated[User, Depends(get_current_user)]):
+                                    current_user: Annotated[User, Depends(require_official)]):
     app = get_application_for_user(db, app_id, current_user)
     return compliance_service.evaluate_compliance(db=db, application_id=app.id)
 

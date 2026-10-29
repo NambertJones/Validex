@@ -22,6 +22,9 @@ class ValidationResultResponse(BaseModel):
     confidence: float
     rule_code: str | None = None
     rule_version: int | None = None
+    rag: str | None = None
+    actionable_by: str | None = None
+    fingerprint: str | None = None
     created_at: datetime
 
 

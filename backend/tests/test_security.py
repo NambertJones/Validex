@@ -61,9 +61,11 @@ def test_other_institution_cannot_reach_application_or_documents(client, apex, z
     doc = client.post("/api/documents/upload", data={"application_id": app["id"], "doc_type": "fire_safety"},
                       files={"file": (name, data, "application/pdf")}, headers=apex).json()
     for url in (f"/api/applications/{app['id']}", f"/api/documents/{doc['id']}", f"/api/documents/{doc['id']}/file",
-                f"/api/documents/{doc['id']}/page/0", f"/api/audit/{app['id']}", f"/api/validation/report/{app['id']}",
-                f"/api/compliance/check/{app['id']}"):
+                f"/api/documents/{doc['id']}/page/0"):
         assert client.get(url, headers=zenith).status_code == 404, url
+    for url in (f"/api/audit/{app['id']}", f"/api/validation/report/{app['id']}", f"/api/compliance/check/{app['id']}",
+                f"/api/triage/{app['id']}"):
+        assert client.get(url, headers=zenith).status_code == 403, url  # officer-only, even for the owner
     res = client.post("/api/documents/upload", data={"application_id": app["id"]},
                       files={"file": ("x.pdf", data, "application/pdf")}, headers=zenith)
     assert res.status_code == 404

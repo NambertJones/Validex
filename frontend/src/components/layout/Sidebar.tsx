@@ -11,12 +11,12 @@ export const Sidebar: React.FC = () => {
     role === 'institution'
       ? [
           { to: '/', label: 'My Applications', icon: FolderOpen },
-          { to: '/notices', label: 'Deficiency Notices', icon: Bell },
+          { to: '/notices', label: 'Clarification Requests', icon: Bell },
           { to: '/compliance', label: 'AICTE Checklist', icon: ShieldCheck },
         ]
       : [
           { to: '/', label: 'Dashboard', icon: LayoutDashboard },
-          { to: '/applications', label: 'Review Queue', icon: FileCheck2 },
+          { to: '/applications', label: 'Triage Queue', icon: FileCheck2 },
           { to: '/compliance', label: role === 'admin' ? 'Rules Engine' : 'Norms & Rules', icon: ShieldCheck },
           { to: '/infrastructure', label: 'Infra CV Studio', icon: Camera },
           { to: '/audit', label: 'Audit Ledger', icon: History },

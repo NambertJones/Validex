@@ -1,27 +1,28 @@
 import React, { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Plus, ArrowRight, FolderOpen } from 'lucide-react';
-import { applicationsApi, errorMessage } from '../api/client';
-import type { Application } from '../types';
-import { Button, Card, Empty, Modal, Spinner, StatusPill, fmtDay } from '../components/ui';
+import { errorMessage, portalApi } from '../api/client';
+import type { PortalApplication } from '../types';
+import { Button, Card, Empty, Modal, Pill, Spinner, fmtDay } from '../components/ui';
+import { PORTAL_STATUS } from './PortalApplicationPage';
 import { useAuth } from '../context/AuthContext';
 
 export const InstitutionHomePage: React.FC = () => {
   const { user } = useAuth();
   const navigate = useNavigate();
-  const [apps, setApps] = useState<Application[] | null>(null);
+  const [apps, setApps] = useState<PortalApplication[] | null>(null);
   const [creating, setCreating] = useState(false);
   const [form, setForm] = useState({ category: 'eoa', academic_year: '2026-2027', permanent_id: '', requested_intake: '' });
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
-  useEffect(() => { applicationsApi.list().then(setApps); }, []);
+  useEffect(() => { portalApi.list().then(setApps); }, []);
 
   const create = async () => {
     setBusy(true);
     setError('');
     try {
-      const app = await applicationsApi.create({
+      const app = await portalApi.create({
         category: form.category, academic_year: form.academic_year,
         permanent_id: form.permanent_id || undefined,
         requested_intake: form.requested_intake ? Number(form.requested_intake) : undefined,
@@ -47,10 +48,10 @@ export const InstitutionHomePage: React.FC = () => {
       <Card>
         <ol className="grid md:grid-cols-4 gap-4 text-xs">
           {[
-            ['1. Create a draft', 'Choose the application category; the checklist is set from AICTE rules.'],
-            ['2. Upload evidence', 'Upload each document in its checklist slot. Each file is read and checked automatically.'],
-            ['3. Self-check', 'Run the AI pre-check, fix anything flagged (with instructions) before AICTE sees it.'],
-            ['4. Submit', 'Officials review the evidence-linked report. Deficiency notices come back here to rectify item by item.'],
+            ['1. Create a draft', 'Choose the application category; the checklist is set from the AICTE Approval Process Handbook.'],
+            ['2. Upload documents', 'Upload each document in its checklist slot. Each file is sealed with a chain-of-custody watermark on receipt.'],
+            ['3. Submit', 'AICTE officers scrutinise the application against the handbook norms.'],
+            ['4. Respond', 'If anything is missing or expired, an encrypted clarification request arrives here.'],
           ].map(([t, d]) => (
             <li key={t}><p className="font-bold text-slate-900">{t}</p><p className="text-slate-500 mt-1">{d}</p></li>
           ))}
@@ -70,9 +71,9 @@ export const InstitutionHomePage: React.FC = () => {
                   <div>
                     <p className="font-mono text-xs font-bold text-indigo-700">{a.application_number}</p>
                     <p className="text-[11px] text-slate-500 uppercase">{a.category.replace('_', ' ')} · AY {a.academic_year} · updated {fmtDay(a.updated_at)}</p>
-                    {a.rectification_due && a.status === 'deficiency_found' && <p className="text-[11px] text-rose-600 font-semibold mt-0.5">Rectify by {fmtDay(a.rectification_due)}</p>}
+                    {a.rectification_due && a.status === 'clarification_requested' && <p className="text-[11px] text-amber-700 font-semibold mt-0.5">Respond by {fmtDay(a.rectification_due)}</p>}
                   </div>
-                  <div className="flex items-center gap-3"><StatusPill status={a.status} /><ArrowRight className="w-4 h-4 text-slate-400" /></div>
+                  <div className="flex items-center gap-3"><Pill tone={PORTAL_STATUS[a.status].tone}>{PORTAL_STATUS[a.status].label}</Pill><ArrowRight className="w-4 h-4 text-slate-400" /></div>
                 </Link>
               </li>
             ))}

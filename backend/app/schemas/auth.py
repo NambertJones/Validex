@@ -48,3 +48,4 @@ class UserResponse(BaseModel):
     institution_name: str | None
     is_active: bool
     created_at: datetime
+    public_key_pem: str | None = None

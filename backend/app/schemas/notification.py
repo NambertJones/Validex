@@ -15,6 +15,8 @@ class NotificationResponse(BaseModel):
     subject: str
     body: str
     items: list[dict[str, Any]]
+    encrypted_payload: dict[str, str] | None = None
+    payload_sha256: str | None = None
     channels: list[str]
     status: NotificationStatus
     due_date: datetime | None

@@ -8,6 +8,7 @@ export interface User {
   institution_name?: string | null;
   is_active: boolean;
   created_at?: string;
+  public_key_pem?: string | null;
 }
 
 export type ApplicationStatus =
@@ -72,6 +73,8 @@ export type DocumentType =
   | 'affidavit'
   | 'building_plan'
   | 'lab_photo'
+  | 'asset_register'
+  | 'campus_boundary'
   | 'other';
 
 export type DocumentStatus = 'pending' | 'processing' | 'validated' | 'flagged' | 'rejected' | 'failed';
@@ -167,6 +170,9 @@ export interface ValidationResult {
   confidence: number;
   rule_code?: string | null;
   rule_version?: number | null;
+  rag?: Rag | null;
+  actionable_by?: 'institution' | 'officer' | 'system' | null;
+  fingerprint?: string | null;
   created_at: string;
 }
 
@@ -266,10 +272,15 @@ export interface ComplianceEvaluation {
   compliant_count: number;
   deficiency_count: number;
   compliance_score: number;
+  amber_count?: number;
   results: {
     rule_code: string;
     title: string;
     category: string;
+    rag?: Rag;
+    clause?: string | null;
+    handbook_reference?: string | null;
+    trace?: string[];
     status: 'compliant' | 'non_compliant' | 'warning' | 'not_applicable';
     message: string;
     evidence?: string | null;
@@ -280,12 +291,23 @@ export interface ComplianceEvaluation {
   }[];
 }
 
+export interface EncryptedEnvelope { alg: string; ek: string; iv: string; ct: string }
+
+export interface ClarificationPayload {
+  application_number: string;
+  note: string;
+  due: string;
+  items: { doc_type: string | null; request: string; what_to_do: string }[];
+}
+
 export interface NotificationItem {
   id: string;
   application_id: string;
   subject: string;
   body: string;
-  items: { finding_id: string; document_id?: string; doc_type?: string; filename?: string; severity: Severity; message: string; fix_hint: string; rule_code?: string }[];
+  items: { fingerprint?: string; rule_code?: string | null; doc_type?: string | null }[];
+  encrypted_payload?: EncryptedEnvelope | null;
+  payload_sha256?: string | null;
   channels: string[];
   status: 'sent' | 'acknowledged' | 'resolved';
   due_date?: string | null;
@@ -318,4 +340,108 @@ export interface InfraReport {
   annotated_image_base64?: string | null;
   needs_manual_review: boolean;
   disclaimer: string;
+}
+
+// ------------------------------------------------------------------ RAG triage (officers only)
+
+export type Rag = 'green' | 'amber' | 'red' | 'not_applicable';
+
+/** Institution-facing ("blind") views: no analysis, flags, scores or processing stages. */
+export type PortalStatus = 'draft' | 'received' | 'under_review' | 'clarification_requested' | 'approved' | 'rejected';
+
+export interface PortalDocument {
+  id: string;
+  doc_type: DocumentType;
+  original_filename: string;
+  file_size: number;
+  uploaded_at: string;
+  is_current: boolean;
+  state: 'received';
+}
+
+export interface PortalApplication {
+  id: string;
+  application_number: string;
+  institution_name: string;
+  permanent_id?: string | null;
+  requested_intake?: number | null;
+  category: ApplicationCategory;
+  academic_year: string;
+  status: PortalStatus;
+  rectification_due?: string | null;
+  submitted_at: string;
+  updated_at: string;
+  documents: PortalDocument[];
+  checklist: { doc_type: DocumentType; title: string; description: string }[];
+}
+
+export interface RuleOutcome {
+  rule_code: string;
+  rule_version: number;
+  title: string;
+  category: string;
+  rag: Rag;
+  kind: string;
+  actionable_by?: string | null;
+  message: string;
+  clause?: string | null;
+  handbook_reference?: string | null;
+  trace?: string[];
+  expected?: string | null;
+  actual?: string | null;
+  fix_hint?: string | null;
+  doc_type?: DocumentType | null;
+}
+
+export interface FindingReviewInfo { decision: 'confirmed' | 'overridden'; reason: string; at: string; reviewer_id: string }
+
+export interface TriageFinding extends ValidationResult { review: FindingReviewInfo | null }
+
+export interface TriageDocument {
+  id: string;
+  doc_type: DocumentType;
+  filename: string;
+  status: DocumentStatus;
+  mime_type: string;
+  page_count: number;
+  uploaded_at: string;
+  watermark?: string | null;
+  original_sha256?: string | null;
+  stored_sha256?: string | null;
+}
+
+export interface TriageBundle {
+  application: Application;
+  rules: RuleOutcome[];
+  findings: TriageFinding[];
+  documents: TriageDocument[];
+  counts: { green_rules: number; amber: number; red: number; red_unreviewed: number };
+  approval_blockers: string[];
+  clarification_candidates: string[];
+}
+
+export interface TriageQueueItem {
+  application: Application;
+  red: number;
+  red_unreviewed: number;
+  red_confirmed: number;
+  amber: number;
+  amber_institution: number;
+}
+
+export interface CustodyReport {
+  intact: boolean;
+  checks: Record<string, boolean>;
+  stored_sha256?: string;
+  watermark?: string | null;
+  received_at?: string | null;
+  note?: string | null;
+  matches_stored_hash_at_intake?: boolean;
+}
+
+export interface GraphView {
+  backend: 'neo4j' | 'in-process';
+  nodes: { id: string; type: string; label: string; focus?: boolean }[];
+  edges: { from: string; to: string; kind: string; application?: string }[];
+  links: { kind: string; finding: string; evidence: string; cypher?: string; masked?: string; serial?: string }[];
 }

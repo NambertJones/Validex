@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.dependencies import get_current_user, get_document_for_user
+from app.core.dependencies import get_current_user, get_document_for_user, require_official
 from app.models.user import User
 from app.models.verification import Verification
 from app.schemas.verification import VerificationResponse
@@ -18,7 +18,7 @@ router = APIRouter(prefix="/verification", tags=["Source Verification"])
 
 @router.post("/trigger/{doc_id}", response_model=list[VerificationResponse], status_code=201)
 def trigger_verification(doc_id: uuid.UUID, db: Annotated[Session, Depends(get_db)],
-                         current_user: Annotated[User, Depends(get_current_user)]):
+                         current_user: Annotated[User, Depends(require_official)]):
     """Verify a document via its signed QR code (offline) and the issuing authority's records (API)."""
     doc = get_document_for_user(db, doc_id, current_user)
     return verification_service.verify_document(db, doc.id, user_id=current_user.id)
@@ -26,7 +26,7 @@ def trigger_verification(doc_id: uuid.UUID, db: Annotated[Session, Depends(get_d
 
 @router.get("/status/{doc_id}", response_model=list[VerificationResponse])
 def get_verification_history(doc_id: uuid.UUID, db: Annotated[Session, Depends(get_db)],
-                             current_user: Annotated[User, Depends(get_current_user)]):
+                             current_user: Annotated[User, Depends(require_official)]):
     doc = get_document_for_user(db, doc_id, current_user)
     return db.query(Verification).filter(Verification.document_id == doc.id).order_by(Verification.verified_at.desc()).all()
 

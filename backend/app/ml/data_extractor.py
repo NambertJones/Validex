@@ -40,6 +40,7 @@ class DataExtractor:
             DocumentType.AFFIDAVIT: self._extract_affidavit,
             DocumentType.BUILDING_PLAN: self._extract_building_plan,
             DocumentType.NOC: self._extract_noc,
+            DocumentType.ASSET_REGISTER: self._extract_asset_register,
         }.get(doc_type)
         if handler:
             extracted.update({k: v for k, v in handler(text).items() if v not in (None, "", [])})
@@ -125,7 +126,34 @@ class DataExtractor:
             "total_faculty": prof + assoc + asst,
             "phd_qualified_count": len(re.findall(r"\bPh\.?\s?D\b", text, re.IGNORECASE)),
             "institution_name": _search(r"^\s*" + NAME_LINE + r"\s+[—-]\s+(?:APPROVED\s+)?FACULTY", text, re.IGNORECASE | re.MULTILINE),
+            "faculty_members": self._faculty_rows(text),
         }
+
+    @staticmethod
+    def _faculty_rows(text: str) -> list[dict[str, Any]]:
+        """One record per faculty row that carries a PAN (identity key for the collusion graph)."""
+        rows = []
+        for line in text.splitlines():
+            pan = re.search(r"\b([A-Z]{5}[0-9]{4}[A-Z])\b", line)
+            if not pan:
+                continue
+            designation = re.search(r"\b(Associate Professor|Assistant Professor|Professor)\b", line)
+            name = line[: designation.start()].strip(" |,-") if designation else line[: pan.start()].strip(" |,-")
+            fid = re.search(r"\b(FAC-\d{4,}|\d-\d{9,10})\b", line)
+            bio = re.search(r"\b(BIO-[A-Z0-9]{6,})\b", line)
+            rows.append({"name": name[:80], "designation": designation.group(1) if designation else None,
+                         "pan": pan.group(1), "faculty_id": fid.group(1) if fid else None,
+                         "biometric_ref": bio.group(1) if bio else None})
+        return rows
+
+    @staticmethod
+    def _extract_asset_register(text: str) -> dict[str, Any]:
+        items = []
+        for line in text.splitlines():
+            sn = re.search(r"(?:S/?N|Serial\s*No\.?)\s*[:#]\s*((?=[A-Z0-9\-]*\d)[A-Z0-9][A-Z0-9\-]{4,})", line, re.IGNORECASE)
+            if sn:
+                items.append({"description": line[: sn.start()].strip(" |,-:")[:80], "serial": sn.group(1).upper()})
+        return {"equipment": items, "equipment_count": len(items)}
 
     def _extract_affidavit(self, text: str) -> dict[str, Any]:
         return {
@@ -141,7 +169,17 @@ class DataExtractor:
             {"room": r.strip(), "area_sqm": float(a)}
             for r, a in re.findall(r"(Classroom[\w\- ]*?)[:\s]+(\d+(?:\.\d+)?)\s*(?:sq\.?\s*m|m2|sqm)", text, re.IGNORECASE)
         ]
+        dims = []
+        for room, area_s, l_s, w_s in re.findall(
+                r"(Classroom[\w\- ]*?)[:\s]+(\d+(?:\.\d+)?)\s*(?:sq\.?\s*m|m2|sqm)\s*\(\s*(\d+(?:\.\d+)?)\s*m?\s*[x×]\s*(\d+(?:\.\d+)?)\s*m?\s*\)",
+                text, re.IGNORECASE):
+            dims.append({"room": room.strip(), "stated_sqm": float(area_s), "length_m": float(l_s), "width_m": float(w_s)})
+        floors = _search(r"Floors?[:\s]+G\s*\+\s*(\d+)", text)
+        coverage = _search(r"(?:Ground\s*Coverage|Footprint)[:\s.]*([\d,]+(?:\.\d+)?)\s*(?:Sq\.?\s*M)", text)
         return {
+            "room_dimensions": dims,
+            "floors": int(floors) + 1 if floors else None,
+            "ground_coverage_sqm": _num(coverage),
             "approval_number": _search(r"(?:Approval|Sanction|Plan)\s*(?:No|Number)\.?[:\s]*([A-Za-z0-9/\-_]{4,})", text),
             "built_up_area_sqm": _num(area),
             "sanctioning_authority": _search(r"(?:Approved\s*by|Sanctioned\s*by)[:\s.]*([^\n\r,]+)", text),
